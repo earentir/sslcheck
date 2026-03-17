@@ -1,0 +1,200 @@
+package runner
+
+import (
+	"context"
+	"net"
+	"net/url"
+	"strings"
+	"time"
+
+	"golang.org/x/net/proxy"
+
+	"sslcheck/internal/dnsprobe"
+	"sslcheck/internal/httpprobe"
+	"sslcheck/internal/logx"
+	"sslcheck/internal/model"
+	"sslcheck/internal/policy"
+	"sslcheck/internal/tlsprobe"
+	"sslcheck/internal/util"
+)
+
+type Options struct {
+	ProfileName    string
+	SkipHTTP       bool
+	SkipActiveOCSP bool
+	FirstIPOnly   bool   // if true, only probe the first resolved IP
+	ProxyURL         string // if set, connect via this HTTP CONNECT proxy (host:port or URL)
+	ScannerVersion   string // e.g. appVersion from main (JSON report + API)
+	ScannerSourceURL string // project URL
+}
+
+func Run(parent context.Context, rawURL string, timeout time.Duration, opts Options) (*model.Report, error) {
+	start := time.Now()
+	logx.Debug("runner.Run start", "raw_url", rawURL, "timeout", timeout.String(), "profile", opts.ProfileName,
+		"skip_http", opts.SkipHTTP, "skip_active_ocsp", opts.SkipActiveOCSP, "first_ip_only", opts.FirstIPOnly, "proxy", opts.ProxyURL != "")
+
+	u, err := util.NormalizeURL(rawURL)
+	if err != nil {
+		logx.Warn("URL normalize failed", "raw", rawURL, "err", err.Error())
+		return nil, err
+	}
+
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	logx.Info("target resolved", "url", u.String(), "host", host, "port", port)
+
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	report := &model.Report{
+		URL: u.String(),
+		Host: host,
+		Port: port,
+	}
+
+	report.DNS, report.Findings = dnsprobe.ResolveHost(ctx, host, port)
+	logx.Info("DNS phase done", "host", host, "ip_count", len(report.DNS.IPs), "lookup_ms", report.DNS.LookupMS, "findings", len(report.Findings))
+
+	if !opts.SkipHTTP {
+		logx.Debug("HTTP probes starting", "host", host)
+		report.Redirect = httpprobe.ProbeRedirect(ctx, u)
+		report.Findings = append(report.Findings, httpprobe.RedirectFindings(report.Redirect)...)
+		chain, errStr := httpprobe.ProbeRedirectChain(ctx, u)
+		report.RedirectChain = chain
+		report.Findings = append(report.Findings, httpprobe.RedirectChainFindings(chain, errStr, host)...)
+
+		report.HTTP = httpprobe.ProbeHTTPS(ctx, u, timeout)
+		report.Findings = append(report.Findings, httpprobe.HTTPSFindings(report.HTTP)...)
+		logx.Info("HTTP probes done", "host", host, "https_err", report.HTTP.Error != "", "redirect_chain_len", len(report.RedirectChain))
+	} else {
+		logx.Info("HTTP probes skipped", "host", host)
+	}
+
+	ips := report.DNS.IPs
+	if opts.FirstIPOnly && len(ips) > 1 {
+		logx.Info("first IP only", "host", host, "total_ips", len(ips), "using", ips[0])
+		ips = ips[:1]
+	}
+	tlsOpts := tlsprobe.Options{SkipActiveOCSP: opts.SkipActiveOCSP}
+	if opts.ProxyURL != "" {
+		logx.Debug("configuring proxy dialer", "proxy", opts.ProxyURL)
+		dialer, err := proxyDialer(opts.ProxyURL)
+		if err != nil {
+			logx.Error("proxy dialer setup failed", "err", err.Error())
+			return nil, err
+		}
+		tlsOpts.DialContext = dialer
+	}
+	for _, ip := range ips {
+		logx.Info("TLS probe endpoint", "host", host, "ip", ip, "port", port)
+		ep := tlsprobe.ProbeEndpoint(ctx, host, port, ip, timeout, tlsOpts)
+		report.Endpoints = append(report.Endpoints, ep)
+		report.Findings = append(report.Findings, ep.Findings...)
+	}
+	augmentNET002WhenOtherFamilyWorks(report)
+
+	for _, ep := range report.Endpoints {
+		if ep.TLSHandshakeOK && len(ep.CertificateChainDetails) > 0 {
+			report.CertificateChain = append([]model.ChainCertificateDetail(nil), ep.CertificateChainDetails...)
+			report.ChainBuildNotes = append([]string(nil), ep.ChainBuildNotes...)
+			if ep.CertSummary != nil {
+				report.LeafDaysUntilExpiry = ep.CertSummary.DaysUntilExpiry
+				report.LeafNotAfter = ep.CertSummary.NotAfter
+			}
+			break
+		}
+	}
+
+	logx.Debug("policy consistency", "endpoints", len(report.Endpoints))
+	report.Findings = append(report.Findings, policy.ConsistencyFindings(report.Endpoints)...)
+	report.Findings = append(report.Findings, policy.ApplyProfile(report, policy.ProfileByName(opts.ProfileName))...)
+	model.SortFindings(report.Findings)
+	logx.Debug("runner.Run complete", "overall", report.Overall, "total_findings", len(report.Findings), "elapsed_ms", time.Since(start).Milliseconds())
+	report.StartedAt = start.UTC().Format(time.RFC3339)
+	report.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+	report.DurationMS = time.Since(start).Milliseconds()
+	report.Overall = policy.DeriveOverall(report.Findings)
+	if opts.ScannerVersion != "" {
+		report.ScannerVersion = opts.ScannerVersion
+	}
+	if opts.ScannerSourceURL != "" {
+		report.ScannerSource = opts.ScannerSourceURL
+	}
+	return report, nil
+}
+
+// proxyDialer returns a context-aware dialer that connects via the given HTTP CONNECT proxy.
+func proxyDialer(proxyURLStr string) (tlsprobe.ContextDialer, error) {
+	u, err := url.Parse(proxyURLStr)
+	if err != nil {
+		return nil, err
+	}
+	if u.Scheme == "" {
+		u.Scheme = "http"
+	}
+	if u.Host == "" && u.Opaque != "" {
+		u.Host = u.Opaque
+	}
+	d, err := proxy.FromURL(u, proxy.Direct)
+	if err != nil {
+		return nil, err
+	}
+	return &contextProxyDialer{d: d}, nil
+}
+
+// augmentNET002WhenOtherFamilyWorks clarifies NET-002 when e.g. IPv4 TLS works but IPv6 had no route.
+func augmentNET002WhenOtherFamilyWorks(report *model.Report) {
+	v4TLS := false
+	v6TLS := false
+	for _, ep := range report.Endpoints {
+		if !ep.TLSHandshakeOK {
+			continue
+		}
+		if ip := net.ParseIP(ep.IP); ip != nil {
+			if ip.To4() != nil {
+				v4TLS = true
+			} else {
+				v6TLS = true
+			}
+		}
+	}
+	for i := range report.Findings {
+		f := &report.Findings[i]
+		if f.Code != "NET-002" {
+			continue
+		}
+		if !strings.Contains(f.Evidence, "(tcp6)") {
+			continue
+		}
+		if v4TLS {
+			f.Description += " IPv4 TLS succeeded from this scanner, so the service is likely fine; this reflects IPv6 connectivity from your network."
+		}
+	}
+	// Symmetric: IPv4 no-route but IPv6 works
+	for i := range report.Findings {
+		f := &report.Findings[i]
+		if f.Code != "NET-002" || !strings.Contains(f.Evidence, "(tcp4)") {
+			continue
+		}
+		if v6TLS {
+			f.Description += " IPv6 TLS succeeded from this scanner, so the service is likely fine; this reflects IPv4 connectivity from your network."
+		}
+	}
+}
+
+type contextProxyDialer struct{ d proxy.Dialer }
+
+func (c *contextProxyDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	conn, err := c.d.Dial(network, address)
+	if err != nil {
+		return nil, err
+	}
+	if ctx.Err() != nil {
+		conn.Close()
+		return nil, ctx.Err()
+	}
+	return conn, nil
+}

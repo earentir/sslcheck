@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sslcheck</title>
+  <style>
+    :root {
+      --bg: #0a0e14;
+      --surface: #131c28;
+      --surface2: #1a2636;
+      --border: #2d3f56;
+      --border-focus: #388bfd;
+      --text: #e6edf3;
+      --muted: #7d96b3;
+      --accent: #4493f8;
+      --accent-hover: #5cadff;
+      --pass: #3fb950;
+      --warn: #d29922;
+      --fail: #f85149;
+      --info: #79c0ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: radial-gradient(ellipse 120% 80% at 50% -20%, #1a2d4a 0%, var(--bg) 55%);
+      color: var(--text);
+      margin: 0;
+      line-height: 1.55;
+      min-height: 100vh;
+    }
+    .wrap { max-width: 920px; margin: 0 auto; padding: 2rem 1.5rem 3rem; }
+    h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0 0 0.35rem;
+      background: linear-gradient(135deg, var(--text) 0%, var(--muted) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .subtitle { color: var(--muted); font-size: 0.95rem; margin: 0 0 1.75rem; max-width: 52ch; }
+
+    /* Large scan editor */
+    .scan-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.25rem 1.35rem 1.35rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+    .scan-panel label {
+      display: block;
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      margin-bottom: 0.65rem;
+    }
+    #url {
+      display: block;
+      width: 100%;
+      padding: 0.9rem 1.15rem;
+      font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+      font-size: 1.05rem;
+      line-height: 1.4;
+      color: var(--text);
+      background: var(--surface2);
+      border: 2px solid var(--border);
+      border-radius: 12px;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .share-box {
+      margin-top: 0.75rem;
+      padding: 0.65rem 0.85rem;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 0.8rem;
+      word-break: break-all;
+    }
+    .share-box a { color: var(--accent); }
+    #copyShare {
+      margin-left: 0.5rem;
+      padding: 0.25rem 0.6rem;
+      font-size: 0.75rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+    }
+    #copyShare:hover { border-color: var(--accent); }
+    #url::placeholder { color: var(--muted); opacity: 0.75; }
+    #url:hover { border-color: #3d5270; }
+    #url:focus {
+      outline: none;
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 4px rgba(56, 139, 253, 0.15);
+    }
+    .scan-actions {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      margin-top: 1rem;
+      flex-wrap: wrap;
+    }
+    #btn {
+      padding: 0.85rem 2rem;
+      background: linear-gradient(180deg, var(--accent-hover) 0%, var(--accent) 100%);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-weight: 700;
+      font-size: 1rem;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(68, 147, 248, 0.35);
+      transition: transform 0.1s, box-shadow 0.15s;
+    }
+    #btn:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(68, 147, 248, 0.45);
+    }
+    #btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
+    .hint { font-size: 0.8rem; color: var(--muted); }
+
+    /* Error / warning banners (hover for full text) */
+    .alert {
+      border-radius: 12px;
+      padding: 1rem 1.15rem;
+      margin-bottom: 1.25rem;
+      border: 1px solid;
+      font-size: 0.92rem;
+    }
+    .alert pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: inherit;
+      line-height: 1.5;
+    }
+    .alert.error {
+      background: rgba(248, 81, 73, 0.08);
+      border-color: rgba(248, 81, 73, 0.45);
+      color: #ffb4af;
+    }
+    .alert.warn {
+      background: rgba(210, 153, 34, 0.1);
+      border-color: rgba(210, 153, 34, 0.4);
+      color: #e3c26c;
+    }
+    .alert-head {
+      font-weight: 700;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.45rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .alert[title] { cursor: help; }
+
+    .hidden { display: none !important; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.15rem 1.35rem;
+      margin-bottom: 1.1rem;
+    }
+    .card h2 {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin: 0 0 0.85rem;
+      font-weight: 600;
+    }
+    .overall { font-size: 1.65rem; font-weight: 800; letter-spacing: -0.02em; }
+    .overall.pass { color: var(--pass); }
+    .overall.warn { color: var(--warn); }
+    .overall.fail { color: var(--fail); }
+    .meta { font-size: 0.88rem; color: var(--muted); margin: 0.35rem 0 0; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th, td {
+      text-align: left;
+      padding: 0.55rem 0.65rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    tr:last-child td { border-bottom: none; }
+    tr[title] { cursor: help; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.5rem;
+      border-radius: 6px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .badge-critical, .badge-high { background: rgba(248,81,73,0.2); color: #ff8b87; }
+    .badge-medium { background: rgba(210,153,34,0.2); color: #e3c26c; }
+    .badge-low, .badge-info { background: rgba(121,192,255,0.12); color: var(--info); }
+
+    .chain-step {
+      margin-bottom: 0.85rem;
+      padding: 0.75rem 0 0.75rem 1rem;
+      border-left: 3px solid var(--accent);
+      background: rgba(68,147,248,0.04);
+      border-radius: 0 8px 8px 0;
+    }
+    .chain-step .role { font-size: 0.68rem; color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+    #raw { font-size: 0.72rem; overflow: auto; max-height: 280px; margin: 0; padding: 0.75rem; background: var(--surface2); border-radius: 8px; }
+    .site-footer {
+      margin-top: 2.5rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-align: center;
+    }
+    .site-footer a { color: var(--accent); text-decoration: none; }
+    .site-footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>sslcheck</h1>
+    <p class="subtitle">One hostname or URL per scan — <code style="color:var(--info)">https://</code> is added when omitted. Share via <code style="color:var(--info)">?host=</code> in the address bar. <a href="https://github.com/earentir/sslcheck" style="color:var(--accent)">GitHub →</a></p>
+
+    <form id="f">
+      <div class="scan-panel">
+        <label for="url">Host or URL</label>
+        <input type="text" id="url" placeholder="earentir.dev or https://example.com" required autocomplete="off" spellcheck="false">
+        <div class="scan-actions">
+          <button type="submit" id="btn">Run scan</button>
+          <span class="hint">Hover findings for full description, evidence &amp; remediation</span>
+        </div>
+      </div>
+    </form>
+
+    <div id="err" class="alert error hidden" title="">
+      <div class="alert-head">Error</div>
+      <pre></pre>
+    </div>
+    <div id="warnBanner" class="alert warn hidden" title="">
+      <div class="alert-head">Warning</div>
+      <pre></pre>
+    </div>
+
+    <div id="out" class="hidden">
+      <div class="card">
+        <h2>Summary</h2>
+        <div class="overall" id="overall"></div>
+        <p id="grade" class="meta"></p>
+        <p id="urlout" class="meta"></p>
+        <div id="shareBox" class="share-box hidden">
+          <strong style="color:var(--muted)">Share link</strong>
+          <div style="margin-top:0.35rem"><a id="shareLink" href="#"></a>
+          <button type="button" id="copyShare">Copy</button></div>
+        </div>
+      </div>
+      <div class="card" id="certCard">
+        <h2>Certificate chain</h2>
+        <p id="leafExp" class="meta"></p>
+        <div id="chain"></div>
+      </div>
+      <div class="card">
+        <h2>DNS</h2>
+        <p id="dns" class="meta"></p>
+      </div>
+      <div class="card">
+        <h2>Findings <span id="nfc"></span></h2>
+        <p class="meta" style="margin-bottom:0.75rem">Hover a row for full detail (evidence + fix). <strong>Guide</strong> opens documentation.</p>
+        <div style="overflow-x:auto">
+          <table id="ft">
+            <thead><tr><th>Severity</th><th>Code</th><th>Title</th><th>What we saw / summary</th><th>Guide</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Raw JSON</h2>
+        <pre id="raw"></pre>
+      </div>
+    </div>
+    <footer class="site-footer" id="foot">
+      <a href="https://github.com/earentir/sslcheck">sslcheck</a>
+      <span id="footVer"></span>
+    </footer>
+  </div>
+  <script>
+    (function () {
+      const repo = 'https://github.com/earentir/sslcheck';
+      fetch('/api/v1/health')
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var el = document.getElementById('foot');
+          var v = document.getElementById('footVer');
+          if (d.scanner_version) v.textContent = ' · v' + d.scanner_version;
+          if (d.scanner_source) el.querySelector('a').href = d.scanner_source;
+        })
+        .catch(function () { document.getElementById('footVer').textContent = ''; });
+    })();
+    function gradeFromReport(r) {
+      let hasC = false, hasH = false, hasM = false, hasL = false;
+      (r.findings || []).forEach(f => {
+        if (f.severity === 'critical') hasC = true;
+        if (f.severity === 'high') hasH = true;
+        if (f.severity === 'medium') hasM = true;
+        if (f.severity === 'low' || f.severity === 'info') hasL = true;
+      });
+      if (r.overall === 'pass') {
+        if (!hasL && !hasM) return 'A+';
+        if (!hasM) return 'A';
+        return 'A-';
+      }
+      if (r.overall === 'warn') return hasM ? 'C' : 'B';
+      if (r.overall === 'fail') {
+        if (hasC) return 'F';
+        if (hasH) return 'D';
+        return 'C';
+      }
+      return '?';
+    }
+    function srcLabel(s) {
+      if (s === 'from_server') return 'sent by server';
+      if (s === 'fetched_aia') return 'fetched via AIA';
+      if (s === 'trust_anchor') return 'trust anchor';
+      return s;
+    }
+    function findingTooltip(f) {
+      const parts = [];
+      if (f.title) parts.push('Title: ' + f.title);
+      if (f.description) parts.push('Detail:\n' + f.description);
+      if (f.evidence) parts.push('Observed:\n' + f.evidence);
+      if (f.remediation) parts.push('How to fix:\n' + f.remediation);
+      if (f.reference_url) parts.push('Read more: ' + f.reference_url);
+      return parts.join('\n\n') || '';
+    }
+    function setShareURL(host) {
+      if (!host) return;
+      var u = new URL(window.location.href);
+      u.search = '';
+      u.searchParams.set('host', host);
+      history.replaceState({}, '', u.pathname + u.search);
+      var link = document.getElementById('shareLink');
+      link.href = u.toString();
+      link.textContent = u.toString();
+      document.getElementById('shareBox').classList.remove('hidden');
+    }
+    document.getElementById('copyShare').addEventListener('click', function () {
+      var t = document.getElementById('shareLink').textContent;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(t).then(function () {
+          document.getElementById('copyShare').textContent = 'Copied';
+          setTimeout(function () { document.getElementById('copyShare').textContent = 'Copy'; }, 2000);
+        });
+      }
+    });
+    async function runScan(url) {
+      const btn = document.getElementById('btn');
+      const errEl = document.getElementById('err');
+      const warnEl = document.getElementById('warnBanner');
+      const out = document.getElementById('out');
+      errEl.classList.add('hidden');
+      warnEl.classList.add('hidden');
+      out.classList.add('hidden');
+      document.getElementById('shareBox').classList.add('hidden');
+      if (!url || !url.trim()) {
+        errEl.querySelector('pre').textContent = 'Enter a hostname or URL.';
+        errEl.removeAttribute('title');
+        errEl.classList.remove('hidden');
+        return;
+      }
+      url = url.trim();
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/v1/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: url, profile: 'modern', timeout_seconds: 30 })
+        });
+        let data;
+        try { data = await res.json(); } catch (_) { data = {}; }
+        if (!res.ok) {
+          const msg = data.error || res.statusText || 'Request failed';
+          errEl.querySelector('pre').textContent = msg;
+          errEl.title = msg.length > 120 ? msg : '';
+          errEl.classList.remove('hidden');
+          return;
+        }
+        const g = gradeFromReport(data);
+        document.getElementById('overall').textContent = data.overall.toUpperCase();
+        document.getElementById('overall').className = 'overall ' + data.overall;
+        document.getElementById('grade').textContent = 'Grade: ' + g;
+        document.getElementById('urlout').textContent = data.url + ' · ' + (data.duration_ms || 0) + ' ms';
+        setShareURL(data.host || '');
+
+        const hi = (data.findings || []).filter(f =>
+          f.severity === 'critical' || f.severity === 'high');
+        if (hi.length) {
+          warnEl.querySelector('pre').textContent = hi.slice(0, 5).map(f =>
+            '[' + f.severity + '] ' + f.code + ': ' + f.title).join('\n') +
+            (hi.length > 5 ? '\n… +' + (hi.length - 5) + ' more (see table)' : '');
+          warnEl.title = hi.map(findingTooltip).join('\n---\n');
+          warnEl.classList.remove('hidden');
+        }
+
+        document.getElementById('leafExp').textContent =
+          'Leaf expires in ' + (data.leaf_days_until_expiry ?? '?') + ' day(s) · ' + (data.leaf_not_after || '');
+        const chain = document.getElementById('chain');
+        chain.innerHTML = '';
+        (data.certificate_chain || []).forEach((c) => {
+          const d = document.createElement('div');
+          d.className = 'chain-step';
+          d.innerHTML =
+            '<div class="role">' + escapeHtml(c.role || '') + '</div>' +
+            '<strong>' + escapeHtml(c.subject || '') + '</strong><br>' +
+            '<span class="meta">Issuer: ' + escapeHtml(c.issuer || '') + '</span><br>' +
+            '<span class="meta">' + escapeHtml(c.not_after || '') + ' · ' + (c.days_until_expiry ?? '') + ' day(s) · ' +
+            srcLabel(c.source) + '</span>';
+          chain.appendChild(d);
+        });
+        if (!data.certificate_chain || !data.certificate_chain.length) {
+          document.getElementById('certCard').style.display = 'none';
+        } else {
+          document.getElementById('certCard').style.display = 'block';
+        }
+        document.getElementById('dns').textContent =
+          'IPs: ' + ((data.dns && data.dns.ips) || []).join(', ') +
+          (data.dns && data.dns.cname ? ' · CNAME: ' + data.dns.cname : '');
+        const tb = document.querySelector('#ft tbody');
+        tb.innerHTML = '';
+        const findings = data.findings || [];
+        document.getElementById('nfc').textContent = '(' + findings.length + ')';
+        findings.forEach(f => {
+          const tip = findingTooltip(f);
+          const tr = document.createElement('tr');
+          tr.setAttribute('title', tip);
+          const sev = escapeHtml(f.severity || '');
+          let sum = '';
+          if (f.evidence) sum = f.evidence;
+          else if (f.description) sum = f.description;
+          else sum = f.title || '';
+          if (sum.length > 160) sum = sum.slice(0, 157) + '…';
+          const refCell = f.reference_url
+            ? '<a href="' + escapeAttr(f.reference_url) + '" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Open</a>'
+            : '<span class="meta">—</span>';
+          tr.innerHTML =
+            '<td><span class="badge badge-' + sev + '">' + sev + '</span></td>' +
+            '<td>' + escapeHtml(f.code) + '</td>' +
+            '<td>' + escapeHtml(f.title || '') + '</td>' +
+            '<td style="max-width:28rem">' + escapeHtml(sum) + '</td>' +
+            '<td>' + refCell + '</td>';
+          tb.appendChild(tr);
+        });
+        document.getElementById('raw').textContent = JSON.stringify(data, null, 2);
+        out.classList.remove('hidden');
+      } catch (x) {
+        errEl.querySelector('pre').textContent = String(x);
+        errEl.title = String(x);
+        errEl.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+    document.getElementById('f').addEventListener('submit', function (e) {
+      e.preventDefault();
+      runScan(document.getElementById('url').value);
+    });
+    (function bootFromHostParam() {
+      function go() {
+        var h = (new URLSearchParams(window.location.search).get('host') || '').trim();
+        if (!h) return;
+        document.getElementById('url').value = h;
+        runScan(h);
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', go);
+      } else {
+        go();
+      }
+    })();
+    function escapeHtml(s) {
+      const d = document.createElement('div');
+      d.textContent = s == null ? '' : String(s);
+      return d.innerHTML;
+    }
+    function escapeAttr(s) {
+      return String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/\n/g, '&#10;');
+    }
+  </script>
+</body>
+</html>
