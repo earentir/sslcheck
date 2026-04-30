@@ -33,6 +33,7 @@ var AllCodes = map[string]string{
 	"EDGE-001": "TLS version inconsistency across IPs",
 	"EDGE-002": "Cipher suite inconsistency across IPs",
 	"EDGE-003": "Certificate inconsistency across IPs",
+	"EDGE-004": "IPv4 vs IPv6 leaf certificate mismatch",
 
 	"HTTP-001": "HTTP redirect check failed",
 	"HTTP-002": "HTTP does not clearly redirect to HTTPS",
