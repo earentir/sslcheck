@@ -9,17 +9,40 @@ import (
 
 	"sslcheck/internal/logx"
 	"sslcheck/internal/model"
+	"sslcheck/internal/netx"
 )
 
-func ProbeSubresourceHost(ctx context.Context, host, port string, timeout time.Duration) model.SubresourceHostResult {
+// ProbeSubresourceHost dials host:port over TLS. resolver and ipVersion ("", "4", "6") match main scan DNS behavior.
+func ProbeSubresourceHost(ctx context.Context, host, port string, timeout time.Duration, resolver *net.Resolver, ipVersion string) model.SubresourceHostResult {
 	out := model.SubresourceHostResult{Host: host}
 	logx.Debug("ProbeSubresourceHost", "host", host)
-	ips, _ := net.DefaultResolver.LookupHost(ctx, host)
+	r := resolver
+	if r == nil {
+		r = net.DefaultResolver
+	}
+	var ips []string
+	switch ipVersion {
+	case "4":
+		list, err := r.LookupIP(ctx, "ip4", host)
+		if err == nil {
+			for _, ip := range list {
+				ips = append(ips, ip.String())
+			}
+		}
+	case "6":
+		list, err := r.LookupIP(ctx, "ip6", host)
+		if err == nil {
+			for _, ip := range list {
+				ips = append(ips, ip.String())
+			}
+		}
+	default:
+		ips, _ = r.LookupHost(ctx, host)
+	}
 	out.IPs = ips
-	addr := net.JoinHostPort(host, port)
 
-	dialer := &net.Dialer{Timeout: timeout}
-	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
+	dialCtx := netx.HTTPDialContext(resolver, ipVersion, timeout)
+	rawConn, err := dialCtx(ctx, "tcp", net.JoinHostPort(host, port))
 	if err != nil {
 		out.Error = err.Error()
 		logx.Debug("subresource TCP fail", "host", host, "err", err.Error())

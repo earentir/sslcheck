@@ -2,6 +2,7 @@ package tlsprobe
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"fmt"
 	"io"
@@ -13,23 +14,27 @@ import (
 	"sslcheck/internal/model"
 )
 
-func checkOCSPURLs(chain []*x509.Certificate) []model.Finding {
+func checkOCSPURLs(ctx context.Context, chain []*x509.Certificate, httpClient *http.Client) []model.Finding {
 	if len(chain) < 2 { return nil }
 
 	leaf := chain[0]
 	issuer := chain[1]
 	var findings []model.Finding
 
+	client := httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Second}
+	}
+
 	for _, ocspURL := range leaf.OCSPServer {
 		reqBody, err := ocsp.CreateRequest(leaf, issuer, nil)
 		if err != nil { continue }
 
-		req, err := http.NewRequest(http.MethodPost, ocspURL, bytes.NewReader(reqBody))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ocspURL, bytes.NewReader(reqBody))
 		if err != nil { continue }
 		req.Header.Set("Content-Type", "application/ocsp-request")
 		req.Header.Set("Accept", "application/ocsp-response")
 
-		client := &http.Client{Timeout: 5 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
 			findings = append(findings, model.Finding{

@@ -24,7 +24,8 @@ type Options struct {
 	SkipActiveOCSP bool
 	FirstIPOnly    bool   // if true, only probe the first resolved IP
 	ProxyURL       string // if set, connect via this HTTP CONNECT proxy (host:port or URL)
-	// DNSServer is an optional resolver (e.g. 1.1.1.1 or host:port); empty uses the OS resolver.
+	// DNSServer is an optional recursive resolver (e.g. 1.1.1.1 or host:port). When set, all hostname
+	// resolution in the scan (DNS phase, HTTP probes, subresource TLS, AIA, active OCSP) uses it; empty uses the OS resolver.
 	DNSServer string
 	// IPVersion is "", "4", or "6" — limit resolution and probing to IPv4 or IPv6 only.
 	IPVersion string
@@ -70,15 +71,18 @@ func Run(parent context.Context, rawURL string, timeout time.Duration, opts Opti
 	report.DNS, report.Findings = dnsprobe.ResolveHost(ctx, host, port, dnsOpts)
 	logx.Info("DNS phase done", "host", host, "ip_count", len(report.DNS.IPs), "lookup_ms", report.DNS.LookupMS, "findings", len(report.Findings))
 
+	resolver := dnsprobe.ResolverForDNSServer(opts.DNSServer)
+	ipVer := strings.TrimSpace(opts.IPVersion)
+
 	if !opts.SkipHTTP {
 		logx.Debug("HTTP probes starting", "host", host)
-		report.Redirect = httpprobe.ProbeRedirect(ctx, u)
+		report.Redirect = httpprobe.ProbeRedirect(ctx, u, resolver, ipVer)
 		report.Findings = append(report.Findings, httpprobe.RedirectFindings(report.Redirect)...)
-		chain, errStr := httpprobe.ProbeRedirectChain(ctx, u)
+		chain, errStr := httpprobe.ProbeRedirectChain(ctx, u, resolver, ipVer)
 		report.RedirectChain = chain
 		report.Findings = append(report.Findings, httpprobe.RedirectChainFindings(chain, errStr, host)...)
 
-		report.HTTP = httpprobe.ProbeHTTPS(ctx, u, timeout)
+		report.HTTP = httpprobe.ProbeHTTPS(ctx, u, timeout, resolver, ipVer)
 		report.Findings = append(report.Findings, httpprobe.HTTPSFindings(report.HTTP)...)
 		logx.Info("HTTP probes done", "host", host, "https_err", report.HTTP.Error != "", "redirect_chain_len", len(report.RedirectChain))
 	} else {
@@ -90,7 +94,10 @@ func Run(parent context.Context, rawURL string, timeout time.Duration, opts Opti
 		logx.Info("first IP only", "host", host, "total_ips", len(ips), "using", ips[0])
 		ips = ips[:1]
 	}
-	tlsOpts := tlsprobe.Options{SkipActiveOCSP: opts.SkipActiveOCSP}
+	tlsOpts := tlsprobe.Options{
+		SkipActiveOCSP: opts.SkipActiveOCSP,
+		FetchHTTP:      httpprobe.FetchHTTPClient(timeout, resolver, ipVer),
+	}
 	if opts.ProxyURL != "" {
 		logx.Debug("configuring proxy dialer", "proxy", opts.ProxyURL)
 		dialer, err := proxyDialer(opts.ProxyURL)

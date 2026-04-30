@@ -26,14 +26,18 @@ type ChainBuildResult struct {
 // ExtendChainWithAIA walks from the leaf toward the trust anchor, fetching missing
 // intermediates (and optionally the root) via AIA Issuing CA URLs until the chain
 // verifies against the system trust store or no more certs can be fetched.
-func ExtendChainWithAIA(ctx context.Context, host string, peerChain []*x509.Certificate, timeout time.Duration) ChainBuildResult {
+// httpClient is used for AIA HTTP(S) fetches; if nil, a default client is used.
+func ExtendChainWithAIA(ctx context.Context, host string, peerChain []*x509.Certificate, timeout time.Duration, httpClient *http.Client) ChainBuildResult {
 	out := ChainBuildResult{FetchedFP: make(map[string]bool)}
 	if len(peerChain) == 0 {
 		return out
 	}
 	var notes []string
 	chain := append([]*x509.Certificate(nil), peerChain...)
-	client := &http.Client{Timeout: timeout}
+	client := httpClient
+	if client == nil {
+		client = &http.Client{Timeout: timeout}
+	}
 
 	tryVerify := func(certs []*x509.Certificate) ([]*x509.Certificate, bool) {
 		if len(certs) == 0 {

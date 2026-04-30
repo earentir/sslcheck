@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -13,10 +14,63 @@ import (
 
 	"sslcheck/internal/logx"
 	"sslcheck/internal/model"
+	"sslcheck/internal/netx"
 	"sslcheck/internal/tlsprobe"
 )
 
-func ProbeRedirect(ctx context.Context, httpsURL *url.URL) model.HTTPRedirectResult {
+func httpRedirectDialTimeout() time.Duration { return 10 * time.Second }
+
+func newHTTPClientPlain(resolver *net.Resolver, ipVersion string, timeout time.Duration) *http.Client {
+	tr := &http.Transport{
+		Proxy:           http.ProxyFromEnvironment,
+		DialContext:     netx.HTTPDialContext(resolver, ipVersion, minDialTimeout(timeout)),
+		ForceAttemptHTTP2: false,
+	}
+	return &http.Client{
+		Timeout:       timeout,
+		Transport:     tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
+func newHTTPClientTLS(serverName string, resolver *net.Resolver, ipVersion string, timeout time.Duration) *http.Client {
+	tr := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		TLSClientConfig: &tls.Config{
+			ServerName: serverName,
+			MinVersion: tls.VersionTLS10,
+			MaxVersion: tls.VersionTLS13,
+			NextProtos: []string{"h2", "http/1.1"},
+		},
+		DialContext:       netx.HTTPDialContext(resolver, ipVersion, minDialTimeout(timeout)),
+		ForceAttemptHTTP2: true,
+	}
+	return &http.Client{Timeout: timeout, Transport: tr}
+}
+
+func minDialTimeout(clientTimeout time.Duration) time.Duration {
+	if clientTimeout <= 0 {
+		return 30 * time.Second
+	}
+	if clientTimeout > 30*time.Second {
+		return 30 * time.Second
+	}
+	return clientTimeout
+}
+
+// FetchHTTPClient builds an HTTP client for outbound HTTPS (AIA, OCSP) using the same DNS resolver and IP family as scan probes.
+func FetchHTTPClient(timeout time.Duration, resolver *net.Resolver, ipVersion string) *http.Client {
+	tr := &http.Transport{
+		Proxy:           http.ProxyFromEnvironment,
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		DialContext:     netx.HTTPDialContext(resolver, ipVersion, minDialTimeout(timeout)),
+		ForceAttemptHTTP2: true,
+	}
+	return &http.Client{Timeout: timeout, Transport: tr}
+}
+
+// ProbeRedirect follows HTTP on port 80. Resolver and ipVersion ("", "4", "6") control how hostnames are resolved.
+func ProbeRedirect(ctx context.Context, httpsURL *url.URL, resolver *net.Resolver, ipVersion string) model.HTTPRedirectResult {
 	httpURL := *httpsURL
 	httpURL.Scheme = "http"
 	if httpURL.Port() == "443" {
@@ -25,10 +79,7 @@ func ProbeRedirect(ctx context.Context, httpsURL *url.URL) model.HTTPRedirectRes
 
 	result := model.HTTPRedirectResult{HTTPURL: httpURL.String()}
 	logx.Debug("ProbeRedirect", "http_url", httpURL.String())
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
-	}
+	client := newHTTPClientPlain(resolver, ipVersion, httpRedirectDialTimeout())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, httpURL.String(), nil)
 	if err != nil {
@@ -54,19 +105,11 @@ func ProbeRedirect(ctx context.Context, httpsURL *url.URL) model.HTTPRedirectRes
 	return result
 }
 
-func ProbeHTTPS(ctx context.Context, u *url.URL, timeout time.Duration) model.HTTPResult {
+// ProbeHTTPS performs a GET on the HTTPS URL. Resolver and ipVersion ("", "4", "6") control how hostnames are resolved.
+func ProbeHTTPS(ctx context.Context, u *url.URL, timeout time.Duration, resolver *net.Resolver, ipVersion string) model.HTTPResult {
 	result := model.HTTPResult{}
 	logx.Debug("ProbeHTTPS GET", "url", u.String(), "timeout", timeout.String())
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			ServerName: u.Hostname(),
-			MinVersion: tls.VersionTLS10,
-			MaxVersion: tls.VersionTLS13,
-			NextProtos: []string{"h2", "http/1.1"},
-		},
-		ForceAttemptHTTP2: true,
-	}
-	client := &http.Client{Timeout: timeout, Transport: tr}
+	client := newHTTPClientTLS(u.Hostname(), resolver, ipVersion, timeout)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -101,7 +144,7 @@ func ProbeHTTPS(ctx context.Context, u *url.URL, timeout time.Duration) model.HT
 	active := activeHTTPSHosts(result.SubresourceRefs, resp.Request.URL.Hostname())
 	logx.Debug("subresource TLS probes", "count", len(active))
 	for _, host := range active {
-		sr := tlsprobe.ProbeSubresourceHost(ctx, host, "443", timeout)
+		sr := tlsprobe.ProbeSubresourceHost(ctx, host, "443", timeout, resolver, ipVersion)
 		result.SubresourceHosts = append(result.SubresourceHosts, sr)
 	}
 	sort.Slice(result.SubresourceHosts, func(i, j int) bool { return result.SubresourceHosts[i].Host < result.SubresourceHosts[j].Host })

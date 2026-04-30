@@ -18,7 +18,7 @@ import (
 )
 
 // appVersion is the release string (override: -ldflags "-X main.appVersion=1.2.3").
-var appVersion = "0.1.104"
+var appVersion = "0.1.106"
 
 const appRepoURL = "https://github.com/earentir/sslcheck"
 

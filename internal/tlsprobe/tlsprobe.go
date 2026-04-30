@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -27,6 +28,8 @@ type ContextDialer interface {
 type Options struct {
 	SkipActiveOCSP bool
 	DialContext    ContextDialer // optional; when set, used for all TCP dials (e.g. via proxy)
+	// FetchHTTP is used for AIA and active OCSP HTTP requests; should use the same DNS policy as the scan.
+	FetchHTTP *http.Client
 }
 
 func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.Duration, opts Options) model.EndpointResult {
@@ -105,7 +108,7 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 	}
 
 	logx.Debug("chain build AIA extend", "ip", ip, "raw_certs", len(rawChain))
-	chainBuild := ExtendChainWithAIA(parent, host, rawChain, timeout)
+	chainBuild := ExtendChainWithAIA(parent, host, rawChain, timeout, opts.FetchHTTP)
 	logx.Debug("chain build result", "ip", ip, "full_len", len(chainBuild.Chain), "verified", chainBuild.VerifiedOK, "notes", len(chainBuild.Notes))
 	fullChain := chainBuild.Chain
 	summary, certFindings := analyzeCertificates(host, fullChain)
@@ -119,7 +122,7 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 			"Chain not fully verified to a system trust anchor with the built path (see certificate findings).")
 	}
 	if !opts.SkipActiveOCSP {
-		result.Findings = append(result.Findings, checkOCSPURLs(rawChain)...)
+		result.Findings = append(result.Findings, checkOCSPURLs(parent, rawChain, opts.FetchHTTP)...)
 	}
 
 	if bestState.Version <= tls.VersionTLS11 {

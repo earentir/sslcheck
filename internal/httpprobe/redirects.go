@@ -3,6 +3,7 @@ package httpprobe
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -10,9 +11,11 @@ import (
 
 	"sslcheck/internal/logx"
 	"sslcheck/internal/model"
+	"sslcheck/internal/netx"
 )
 
-func ProbeRedirectChain(ctx context.Context, httpsURL *url.URL) ([]string, string) {
+// ProbeRedirectChain follows HTTP redirects on port 80. Resolver and ipVersion ("", "4", "6") control hostname resolution.
+func ProbeRedirectChain(ctx context.Context, httpsURL *url.URL, resolver *net.Resolver, ipVersion string) ([]string, string) {
 	httpURL := *httpsURL
 	httpURL.Scheme = "http"
 	if httpURL.Port() == "443" {
@@ -20,8 +23,14 @@ func ProbeRedirectChain(ctx context.Context, httpsURL *url.URL) ([]string, strin
 	}
 	var chain []string
 	logx.Debug("ProbeRedirectChain start", "from", httpURL.String())
+	tr := &http.Transport{
+		Proxy:           http.ProxyFromEnvironment,
+		DialContext:     netx.HTTPDialContext(resolver, ipVersion, 10*time.Second),
+		ForceAttemptHTTP2: false,
+	}
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout:   10 * time.Second,
+		Transport: tr,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			chain = append(chain, req.URL.String())
 			if len(via) >= 10 {

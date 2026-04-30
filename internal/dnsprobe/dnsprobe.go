@@ -17,7 +17,7 @@ import (
 // ResolveOptions configures how the host name is resolved.
 type ResolveOptions struct {
 	// Server is a custom recursive resolver as host:port (e.g. "1.1.1.1" or "[2001:db8::1]:5353").
-	// Empty uses the OS stub resolver configuration.
+	// Empty uses the OS resolver for this lookup. The runner passes the same DNSServer to HTTP/TLS paths.
 	Server string
 	// IPNetwork is one of "", "ip4", or "ip6". When set, only that address family is queried.
 	IPNetwork string
@@ -44,15 +44,18 @@ func normalizeDNSServerAddr(user string) string {
 	return net.JoinHostPort(s, "53")
 }
 
-func resolverDialing(serverHostPort string) *net.Resolver {
-	if serverHostPort == "" {
+// ResolverForDNSServer returns net.DefaultResolver when server is empty; otherwise a Resolver
+// that sends all queries to the given recursive server (host:port, default port 53).
+func ResolverForDNSServer(server string) *net.Resolver {
+	addr := normalizeDNSServerAddr(strings.TrimSpace(server))
+	if addr == "" {
 		return net.DefaultResolver
 	}
 	return &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			var d net.Dialer
-			return d.DialContext(ctx, network, serverHostPort)
+			return d.DialContext(ctx, network, addr)
 		},
 	}
 }
@@ -61,13 +64,12 @@ func ResolveHost(ctx context.Context, host, port string, opts ResolveOptions) (m
 	start := time.Now()
 	var findings []model.Finding
 	result := model.DNSResult{Host: host, Port: port}
-	dnsDial := normalizeDNSServerAddr(opts.Server)
-	res := resolverDialing(dnsDial)
+	res := ResolverForDNSServer(opts.Server)
 	network := strings.TrimSpace(opts.IPNetwork)
 	if network != "" && network != "ip4" && network != "ip6" {
 		network = ""
 	}
-	logx.Debug("DNS lookup", "host", host, "custom_server", dnsDial != "", "ip_network", network)
+	logx.Debug("DNS lookup", "host", host, "custom_server", strings.TrimSpace(opts.Server) != "", "ip_network", network)
 
 	var ipList []net.IP
 	var err error
@@ -117,7 +119,7 @@ func ResolveHost(ctx context.Context, host, port string, opts ResolveOptions) (m
 	} else {
 		logx.Debug("DNS CNAME lookup", "host", host, "err", err.Error())
 	}
-	result.CAARecords = lookupCAA(ctx, host, dnsDial)
+	result.CAARecords = lookupCAA(ctx, host, normalizeDNSServerAddr(opts.Server))
 	logx.Debug("DNS CAA", "host", host, "records", len(result.CAARecords))
 	result.LookupMS = time.Since(start).Milliseconds()
 
