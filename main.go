@@ -18,7 +18,7 @@ import (
 )
 
 // appVersion is the release string (override: -ldflags "-X main.appVersion=1.2.3").
-var appVersion = "0.1.102"
+var appVersion = "0.1.104"
 
 const appRepoURL = "https://github.com/earentir/sslcheck"
 
@@ -35,6 +35,8 @@ type appOpts struct {
 	FilePath                      string
 	FirstIPOnly                   bool
 	ProxyURL                      string
+	DNSServer                     string
+	IPv4Only, IPv6Only            bool
 	LogFile, LogLevel             string
 	Listen                        string
 }
@@ -69,6 +71,9 @@ func init() {
 	fs.StringVar(&App.FilePath, "file", "", "read URLs from file (one per line, # for comments)")
 	fs.BoolVar(&App.FirstIPOnly, "ip", false, "only probe the first resolved IP")
 	fs.StringVar(&App.ProxyURL, "proxy", "", "connect via HTTP CONNECT proxy (host:port or URL)")
+	fs.StringVar(&App.DNSServer, "dns-server", "", "use this DNS resolver for lookups (IP, hostname, or host:port; default port 53)")
+	fs.BoolVar(&App.IPv4Only, "ipv4", false, "resolve and probe IPv4 only")
+	fs.BoolVar(&App.IPv6Only, "ipv6", false, "resolve and probe IPv6 only")
 
 	rootCmd.Version = appVersion
 	rootCmd.SetVersionTemplate("sslcheck {{.Version}}\n" + appRepoURL + "\n")
@@ -130,10 +135,21 @@ func run(_ *cobra.Command, args []string) error {
 	if len(urls) < 1 {
 		return fmt.Errorf("at least one URL required (use positional args or --file); use --schema to emit schema or --help for usage")
 	}
+	if App.IPv4Only && App.IPv6Only {
+		return fmt.Errorf("use only one of --ipv4 or --ipv6")
+	}
+	ipVer := ""
+	if App.IPv4Only {
+		ipVer = "4"
+	}
+	if App.IPv6Only {
+		ipVer = "6"
+	}
 
 	logx.Info("scan run starting", "url_count", len(urls), "profile", App.Profile, "timeout", App.Timeout.String(),
 		"no_http", App.NoHTTP, "no_active_ocsp", App.NoActiveOCSP, "first_ip_only", App.FirstIPOnly,
-		"proxy_set", App.ProxyURL != "", "json", App.JSONOut, "csv", App.CSVOut, "quiet", App.Quiet)
+		"proxy_set", App.ProxyURL != "", "dns_server_set", App.DNSServer != "", "ip_version", ipVer,
+		"json", App.JSONOut, "csv", App.CSVOut, "quiet", App.Quiet)
 
 	opts := runner.Options{
 		ProfileName:      App.Profile,
@@ -141,6 +157,8 @@ func run(_ *cobra.Command, args []string) error {
 		SkipActiveOCSP:   App.NoActiveOCSP,
 		FirstIPOnly:      App.FirstIPOnly,
 		ProxyURL:         App.ProxyURL,
+		DNSServer:        strings.TrimSpace(App.DNSServer),
+		IPVersion:        ipVer,
 		ScannerVersion:   appVersion,
 		ScannerSourceURL: appRepoURL,
 	}

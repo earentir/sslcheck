@@ -21,8 +21,8 @@ var apiCmd = &cobra.Command{
 
   GET  /api/v1/health          — liveness (+ scanner_version, scanner_source)
   GET  /api/v1/schema          — JSON report schema
-  GET  /api/v1/scan?url=...    — run scan (query: profile, timeout_seconds, no_http, no_active_ocsp, first_ip_only, proxy_url)
-  POST /api/v1/scan            — JSON body: {"url":"https://...","profile":"modern","timeout_seconds":30,...}
+  GET  /api/v1/scan?url=...    — run scan (query: profile, timeout_seconds, no_http, no_active_ocsp, first_ip_only, proxy_url, dns_server, ip_version)
+  POST /api/v1/scan            — JSON body: {"url":"https://...","dns_server":"1.1.1.1","ip_version":"4",...}
 
 Project: https://github.com/earentir/sslcheck
 

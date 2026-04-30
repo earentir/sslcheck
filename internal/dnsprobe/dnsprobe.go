@@ -14,13 +14,75 @@ import (
 	"sslcheck/internal/model"
 )
 
-func ResolveHost(ctx context.Context, host, port string) (model.DNSResult, []model.Finding) {
+// ResolveOptions configures how the host name is resolved.
+type ResolveOptions struct {
+	// Server is a custom recursive resolver as host:port (e.g. "1.1.1.1" or "[2001:db8::1]:5353").
+	// Empty uses the OS stub resolver configuration.
+	Server string
+	// IPNetwork is one of "", "ip4", or "ip6". When set, only that address family is queried.
+	IPNetwork string
+}
+
+func normalizeDNSServerAddr(user string) string {
+	s := strings.TrimSpace(user)
+	if s == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(s)
+	if err == nil {
+		if port == "" {
+			port = "53"
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			return net.JoinHostPort(ip.String(), port)
+		}
+		return net.JoinHostPort(host, port)
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		return net.JoinHostPort(ip.String(), "53")
+	}
+	return net.JoinHostPort(s, "53")
+}
+
+func resolverDialing(serverHostPort string) *net.Resolver {
+	if serverHostPort == "" {
+		return net.DefaultResolver
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, serverHostPort)
+		},
+	}
+}
+
+func ResolveHost(ctx context.Context, host, port string, opts ResolveOptions) (model.DNSResult, []model.Finding) {
 	start := time.Now()
 	var findings []model.Finding
 	result := model.DNSResult{Host: host, Port: port}
-	logx.Debug("DNS LookupIPAddr", "host", host)
+	dnsDial := normalizeDNSServerAddr(opts.Server)
+	res := resolverDialing(dnsDial)
+	network := strings.TrimSpace(opts.IPNetwork)
+	if network != "" && network != "ip4" && network != "ip6" {
+		network = ""
+	}
+	logx.Debug("DNS lookup", "host", host, "custom_server", dnsDial != "", "ip_network", network)
 
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	var ipList []net.IP
+	var err error
+	switch network {
+	case "ip4", "ip6":
+		ipList, err = res.LookupIP(ctx, network, host)
+	default:
+		var addrs []net.IPAddr
+		addrs, err = res.LookupIPAddr(ctx, host)
+		if err == nil {
+			for _, a := range addrs {
+				ipList = append(ipList, a.IP)
+			}
+		}
+	}
 	if err != nil {
 		logx.Warn("DNS resolution failed", "host", host, "err", err.Error())
 		findings = append(findings, model.Finding{
@@ -35,22 +97,27 @@ func ResolveHost(ctx context.Context, host, port string) (model.DNSResult, []mod
 	}
 
 	seen := map[string]struct{}{}
-	for _, ip := range ips {
-		s := ip.IP.String()
-		if _, ok := seen[s]; ok { continue }
+	for _, ip := range ipList {
+		if ip == nil {
+			continue
+		}
+		s := ip.String()
+		if _, ok := seen[s]; ok {
+			continue
+		}
 		seen[s] = struct{}{}
 		result.IPs = append(result.IPs, s)
 	}
 	sort.Strings(result.IPs)
 	logx.Debug("DNS A/AAAA", "host", host, "ips", result.IPs)
 
-	if cname, err := net.DefaultResolver.LookupCNAME(ctx, host); err == nil {
+	if cname, err := res.LookupCNAME(ctx, host); err == nil {
 		result.CNAME = strings.TrimSuffix(cname, ".")
 		logx.Debug("DNS CNAME", "host", host, "cname", result.CNAME)
 	} else {
 		logx.Debug("DNS CNAME lookup", "host", host, "err", err.Error())
 	}
-	result.CAARecords = lookupCAA(ctx, host)
+	result.CAARecords = lookupCAA(ctx, host, dnsDial)
 	logx.Debug("DNS CAA", "host", host, "records", len(result.CAARecords))
 	result.LookupMS = time.Since(start).Milliseconds()
 
@@ -96,16 +163,22 @@ func ResolveHost(ctx context.Context, host, port string) (model.DNSResult, []mod
 	return result, findings
 }
 
-func lookupCAA(ctx context.Context, host string) []model.CAARecord {
-	cfg, err := dns.ClientConfigFromFile("/etc/resolv.conf")
-	if err != nil || len(cfg.Servers) == 0 {
-		return nil
+func lookupCAA(ctx context.Context, host string, customServerHostPort string) []model.CAARecord {
+	var serverAddr string
+	if customServerHostPort != "" {
+		serverAddr = customServerHostPort
+	} else {
+		cfg, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+		if err != nil || len(cfg.Servers) == 0 {
+			return nil
+		}
+		serverAddr = net.JoinHostPort(cfg.Servers[0], cfg.Port)
 	}
 
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(host), dns.TypeCAA)
 	client := &dns.Client{}
-	in, _, err := client.ExchangeContext(ctx, msg, net.JoinHostPort(cfg.Servers[0], cfg.Port))
+	in, _, err := client.ExchangeContext(ctx, msg, serverAddr)
 	if err != nil {
 		return nil
 	}

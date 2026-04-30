@@ -23,6 +23,8 @@ type ScanOptions struct {
 	NoActiveOCSP   bool   `json:"no_active_ocsp"`
 	FirstIPOnly    bool   `json:"first_ip_only"`
 	ProxyURL       string `json:"proxy_url"`
+	DNSServer      string `json:"dns_server"`
+	IPVersion      string `json:"ip_version"` // "", "4", or "6"
 }
 
 func defaultScanOptions() ScanOptions {
@@ -50,6 +52,11 @@ func RunScan(ctx context.Context, opts ScanOptions) (*model.Report, int, string)
 	if opts.TimeoutSeconds > 120 {
 		opts.TimeoutSeconds = 120
 	}
+	opts.IPVersion = strings.TrimSpace(opts.IPVersion)
+	if opts.IPVersion != "" && opts.IPVersion != "4" && opts.IPVersion != "6" {
+		logx.Warn("RunScan rejected: bad ip_version", "ip_version", opts.IPVersion)
+		return nil, http.StatusBadRequest, "ip_version must be 4 or 6"
+	}
 	timeout := time.Duration(opts.TimeoutSeconds) * time.Second
 	runOpts := runner.Options{
 		ProfileName:      opts.Profile,
@@ -57,6 +64,8 @@ func RunScan(ctx context.Context, opts ScanOptions) (*model.Report, int, string)
 		SkipActiveOCSP:   opts.NoActiveOCSP,
 		FirstIPOnly:      opts.FirstIPOnly,
 		ProxyURL:         strings.TrimSpace(opts.ProxyURL),
+		DNSServer:        strings.TrimSpace(opts.DNSServer),
+		IPVersion:        opts.IPVersion,
 		ScannerVersion:   scannerVersion,
 		ScannerSourceURL: scannerSource,
 	}
@@ -135,7 +144,7 @@ func HandleScanPOST(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
-// HandleScanGET uses query: url, profile, timeout_seconds, no_http, no_active_ocsp, first_ip_only, proxy_url.
+// HandleScanGET uses query: url, profile, timeout_seconds, no_http, no_active_ocsp, first_ip_only, proxy_url, dns_server, ip_version.
 func HandleScanGET(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -159,6 +168,10 @@ func HandleScanGET(w http.ResponseWriter, r *http.Request) {
 	opts.NoActiveOCSP = q.Get("no_active_ocsp") == "1" || strings.EqualFold(q.Get("no_active_ocsp"), "true")
 	opts.FirstIPOnly = q.Get("first_ip_only") == "1" || strings.EqualFold(q.Get("first_ip_only"), "true")
 	opts.ProxyURL = q.Get("proxy_url")
+	opts.DNSServer = q.Get("dns_server")
+	if v := strings.TrimSpace(q.Get("ip_version")); v != "" {
+		opts.IPVersion = v
+	}
 
 	ctx := r.Context()
 	rep, status, msg := RunScan(ctx, opts)

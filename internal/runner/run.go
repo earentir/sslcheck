@@ -22,8 +22,12 @@ type Options struct {
 	ProfileName    string
 	SkipHTTP       bool
 	SkipActiveOCSP bool
-	FirstIPOnly   bool   // if true, only probe the first resolved IP
-	ProxyURL         string // if set, connect via this HTTP CONNECT proxy (host:port or URL)
+	FirstIPOnly    bool   // if true, only probe the first resolved IP
+	ProxyURL       string // if set, connect via this HTTP CONNECT proxy (host:port or URL)
+	// DNSServer is an optional resolver (e.g. 1.1.1.1 or host:port); empty uses the OS resolver.
+	DNSServer string
+	// IPVersion is "", "4", or "6" — limit resolution and probing to IPv4 or IPv6 only.
+	IPVersion string
 	ScannerVersion   string // e.g. appVersion from main (JSON report + API)
 	ScannerSourceURL string // project URL
 }
@@ -31,7 +35,8 @@ type Options struct {
 func Run(parent context.Context, rawURL string, timeout time.Duration, opts Options) (*model.Report, error) {
 	start := time.Now()
 	logx.Debug("runner.Run start", "raw_url", rawURL, "timeout", timeout.String(), "profile", opts.ProfileName,
-		"skip_http", opts.SkipHTTP, "skip_active_ocsp", opts.SkipActiveOCSP, "first_ip_only", opts.FirstIPOnly, "proxy", opts.ProxyURL != "")
+		"skip_http", opts.SkipHTTP, "skip_active_ocsp", opts.SkipActiveOCSP, "first_ip_only", opts.FirstIPOnly, "proxy", opts.ProxyURL != "",
+		"dns_server_set", opts.DNSServer != "", "ip_version", opts.IPVersion)
 
 	u, err := util.NormalizeURL(rawURL)
 	if err != nil {
@@ -55,7 +60,14 @@ func Run(parent context.Context, rawURL string, timeout time.Duration, opts Opti
 		Port: port,
 	}
 
-	report.DNS, report.Findings = dnsprobe.ResolveHost(ctx, host, port)
+	dnsOpts := dnsprobe.ResolveOptions{Server: opts.DNSServer}
+	switch strings.TrimSpace(opts.IPVersion) {
+	case "4":
+		dnsOpts.IPNetwork = "ip4"
+	case "6":
+		dnsOpts.IPNetwork = "ip6"
+	}
+	report.DNS, report.Findings = dnsprobe.ResolveHost(ctx, host, port, dnsOpts)
 	logx.Info("DNS phase done", "host", host, "ip_count", len(report.DNS.IPs), "lookup_ms", report.DNS.LookupMS, "findings", len(report.Findings))
 
 	if !opts.SkipHTTP {
