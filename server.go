@@ -20,6 +20,8 @@ var apiCmd = &cobra.Command{
 
   GET  /api/v1/health          — liveness (+ scanner_version, scanner_source)
   GET  /api/v1/schema          — JSON report schema
+  GET  /api/v1/checks          — list supported finding codes
+  GET  /api/v1/checks/{code}   — catalog detail for one code (e.g. CERT-011)
   GET  /api/v1/scan?url=...    — run scan (query: profile, timeout_seconds, no_http, no_active_ocsp, first_ip_only, proxy_url, dns_server, ip_version)
   POST /api/v1/scan            — JSON body: {"url":"https://...","dns_server":"1.1.1.1","ip_version":"4",...}
 

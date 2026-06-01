@@ -44,6 +44,8 @@ func Web(static fs.FS) http.Handler {
 func registerAPI(m *http.ServeMux) {
 	m.HandleFunc("/api/v1/health", HandleHealth)
 	m.HandleFunc("/api/v1/schema", HandleSchema)
+	m.HandleFunc("GET /api/v1/checks", HandleChecksList)
+	m.HandleFunc("GET /api/v1/checks/{code}", HandleCheckGet)
 	m.HandleFunc("/api/v1/scan", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

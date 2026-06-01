@@ -63,6 +63,8 @@ Listen address: `--listen` (default `:8080`).
 |--------|------|-------------|
 | GET | `/api/v1/health` | `{"status":"ok","scanner_version":"…","scanner_source":"https://github.com/earentir/sslcheck"}` |
 | GET | `/api/v1/schema` | JSON schema for reports |
+| GET | `/api/v1/checks` | List all supported finding codes (summary) |
+| GET | `/api/v1/checks/{code}` | Full metadata for one finding code (e.g. `CERT-011`) |
 | GET | `/api/v1/scan?url=https://...` | Run scan (optional: `profile`, `timeout_seconds`, `no_http`, `no_active_ocsp`, `first_ip_only`, `proxy_url`) |
 | POST | `/api/v1/scan` | Body: `{"url":"earentir.dev"}` or full URL — same rules as CLI |
 
