@@ -25,6 +25,8 @@ go build -ldflags "-X main.appVersion=1.0.0" -o sslcheck .
 
 Default is the `appVersion` var at the top of `main.go`.
 
+Integration / fixture tests (no external network): see [docs/VERIFICATION.md](docs/VERIFICATION.md).
+
 ## Usage
 
 ```

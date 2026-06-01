@@ -193,6 +193,7 @@ func Run(parent context.Context, rawURL string, timeout time.Duration, opts Opti
 
 	logx.Debug("policy consistency", "endpoints", len(report.Endpoints))
 	t := time.Now()
+	report.Findings = append(report.Findings, finalizeReport(report)...)
 	report.Findings = append(report.Findings, policy.ConsistencyFindings(report.Endpoints)...)
 	report.Findings = append(report.Findings, policy.ApplyProfile(report, policy.ProfileByName(opts.ProfileName))...)
 	recordPhase("Policy & finalize", t)

@@ -71,7 +71,7 @@ func ResolverForDNSServer(server string) *net.Resolver {
 func ResolveHost(ctx context.Context, host, port string, opts ResolveOptions, timings *[]model.PhaseTiming) (model.DNSResult, []model.Finding) {
 	start := time.Now()
 	var findings []model.Finding
-	result := model.DNSResult{Host: host, Port: port}
+	result := model.DNSResult{Host: host, Port: port, CAARecords: []model.CAARecord{}, TLSARecords: []model.TLSARecord{}}
 	res := ResolverForDNSServer(opts.Server)
 	network := strings.TrimSpace(opts.IPNetwork)
 	if network != "" && network != "ip4" && network != "ip6" {
@@ -139,6 +139,12 @@ func ResolveHost(ctx context.Context, host, port string, opts ResolveOptions, ti
 	caaCancel()
 	recordPhase(timings, "DNS CAA", tCAA)
 	logx.Debug("DNS CAA", "host", host, "records", len(result.CAARecords))
+
+	tTLSA := time.Now()
+	tlsaCtx, tlsaCancel := context.WithTimeout(context.Background(), tlsaLookupTimeout)
+	result.TLSARecords = lookupTLSA(tlsaCtx, host, port, normalizeDNSServerAddr(opts.Server))
+	tlsaCancel()
+	recordPhase(timings, "DNS TLSA", tTLSA)
 
 	if len(result.IPs) == 0 {
 		findings = append(findings, model.Finding{

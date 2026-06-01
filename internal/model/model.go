@@ -32,13 +32,22 @@ type CAARecord struct {
 	Value string `json:"value"`
 }
 
+type TLSARecord struct {
+	Usage        uint8  `json:"usage"`
+	Selector     uint8  `json:"selector"`
+	MatchingType uint8  `json:"matching_type"`
+	Certificate  string `json:"certificate"` // hex
+}
+
 type DNSResult struct {
-	Host       string      `json:"host"`
-	Port       string      `json:"port"`
-	IPs        []string    `json:"ips"`
-	CNAME      string      `json:"cname,omitempty"`
-	CAARecords []CAARecord `json:"caa_records,omitempty"`
-	LookupMS   int64       `json:"lookup_ms"`
+	Host              string       `json:"host"`
+	Port              string       `json:"port"`
+	IPs               []string     `json:"ips"`
+	CNAME             string       `json:"cname,omitempty"`
+	CAARecords        []CAARecord  `json:"caa_records"`
+	CAASatisfiesScan  string       `json:"caa_satisfies_scan,omitempty"` // no_records | allows_issuer | policy_mismatch | unknown_issuer
+	TLSARecords       []TLSARecord `json:"tlsa_records"`
+	LookupMS          int64        `json:"lookup_ms"`
 }
 
 type HTTPRedirectResult struct {
@@ -123,6 +132,8 @@ type CertificateSummary struct {
 	KeyUsage            []string `json:"key_usage,omitempty"`
 	ExtKeyUsage         []string `json:"ext_key_usage,omitempty"`
 	IsCA                bool     `json:"is_ca"`
+	SPKISHA256         string   `json:"spki_sha256,omitempty"`
+	CertSHA256         string   `json:"cert_sha256,omitempty"`
 	HostnameVerified    bool     `json:"hostname_verified"`
 	TrustVerified       bool     `json:"trust_verified"`
 	TrustError          string   `json:"trust_error,omitempty"`
@@ -152,6 +163,24 @@ type CipherPreferenceResult struct {
 	Observed      string `json:"observed,omitempty"`
 }
 
+// CertificateTransparencySummary is CT/SCT facts for JSON consumers.
+type CertificateTransparencySummary struct {
+	SCTCount     int      `json:"sct_count"`
+	SCTSources   []string `json:"sct_sources,omitempty"` // embedded, tls_handshake
+	CTCompliance string   `json:"ct_compliance"`         // unknown | likely_ok | failed
+}
+
+// RevocationSummary aggregates stapled/active OCSP and CRL checks for the leaf.
+type RevocationSummary struct {
+	StapledOCSP          bool   `json:"stapled_ocsp"`
+	StapledOCSPStatus    string `json:"stapled_ocsp_status,omitempty"` // good | revoked | unknown | parse_error | none
+	ActiveOCSPStatus     string `json:"active_ocsp_status,omitempty"`  // good | revoked | unknown | unreachable | not_checked
+	CRLChecked           bool   `json:"crl_checked"`
+	CRLStatus            string `json:"crl_status,omitempty"` // good | revoked | unreachable | not_checked | no_urls
+	MustStapleRequired   bool   `json:"must_staple_required"`
+	OverallRevocationStatus string `json:"revocation_status"` // good | revoked | unknown | incomplete
+}
+
 type EndpointResult struct {
 	IP                string               `json:"ip"`
 	Network           string               `json:"network"`
@@ -167,9 +196,13 @@ type EndpointResult struct {
 	CipherPreference  *CipherPreferenceResult `json:"cipher_preference,omitempty"`
 	PeerCertCount     int                  `json:"peer_cert_count,omitempty"`
 	ProtocolSupport   map[string]bool      `json:"protocol_support,omitempty"`
-	WeakCipherSupport []string             `json:"weak_cipher_support,omitempty"`
+	WeakCipherSupport []string             `json:"weak_cipher_support"`
 	OCSPStapled       bool                 `json:"ocsp_stapled"`
-	OCSPStatus        string               `json:"ocsp_status,omitempty"`
+	OCSPStatus        string               `json:"ocsp_status,omitempty"` // deprecated: use ocsp_stapled_status when stapled
+	OCSPStapledStatus string               `json:"ocsp_stapled_status,omitempty"`
+	CertificateTransparency *CertificateTransparencySummary `json:"certificate_transparency,omitempty"`
+	Revocation            *RevocationSummary              `json:"revocation,omitempty"`
+	ClientAuthRequested   bool                            `json:"client_auth_requested,omitempty"`
 	SCTCount          int                  `json:"sct_count,omitempty"`
 	CertSummary       *CertificateSummary  `json:"cert_summary,omitempty"`
 	Errors            []string             `json:"errors,omitempty"`

@@ -5,8 +5,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -38,6 +40,7 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 	network := util.NetworkForIP(ip)
 	result := model.EndpointResult{
 		IP: ip, Network: network, ProtocolSupport: make(map[string]bool),
+		WeakCipherSupport: []string{},
 	}
 
 	dialer := opts.DialContext
@@ -69,6 +72,7 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 		func() {
 			probeProtocolVersions(parent, host, port, ip, network, timeout, &result, dialer)
 			probeWeakCiphers(parent, host, port, ip, network, timeout, &result, dialer)
+			probeInsecureCiphers(parent, host, port, ip, network, timeout, &result, dialer)
 		},
 		func() {
 			bestState, rawChain, bestErr = probeBestHandshake(parent, host, port, ip, network, timeout, dialer)
@@ -122,6 +126,7 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 func probeEndpointFast(host, port, ip, network string, timeout time.Duration, dialer ContextDialer, opts Options) model.EndpointResult {
 	result := model.EndpointResult{
 		IP: ip, Network: network, ProtocolSupport: make(map[string]bool),
+		WeakCipherSupport: []string{},
 	}
 	logx.Debug("TLS fast probe", "ip", ip)
 	bestState, rawChain, err := probeBestHandshake(context.Background(), host, port, ip, network, timeout, dialer)
@@ -170,14 +175,21 @@ func applyBestHandshake(result *model.EndpointResult, host, ip string, bestState
 	result.PeerCertCount = len(bestState.PeerCertificates)
 	result.OCSPStapled = len(bestState.OCSPResponse) > 0
 	result.SCTCount = len(bestState.SignedCertificateTimestamps)
-
+	stapleStatus := ""
 	if result.OCSPStapled {
 		if status, err := parseOCSPStatus(bestState.OCSPResponse, rawChain); err == nil {
 			result.OCSPStatus = status
+			result.OCSPStapledStatus = status
+			stapleStatus = status
 		} else {
+			result.OCSPStapledStatus = "parse_error"
+			stapleStatus = "parse_error"
 			result.Warnings = append(result.Warnings, "ocsp stapling present but parse failed: "+err.Error())
 		}
-	} else if summaryChainHasOCSP(rawChain) {
+	} else {
+		result.OCSPStapledStatus = "none"
+	}
+	if !result.OCSPStapled && summaryChainHasOCSP(rawChain) {
 		result.Findings = append(result.Findings, model.Finding{
 			Code: "TLS-021", Severity: model.SeverityInfo, Title: "OCSP stapling not offered",
 			Description: "The leaf cert lists an OCSP URL, but the TLS handshake had no stapled OCSP response—clients must query the CA instead.",
@@ -203,8 +215,30 @@ func applyBestHandshake(result *model.EndpointResult, host, ip string, bestState
 		result.ChainBuildNotes = append(result.ChainBuildNotes,
 			"Chain not fully verified to a system trust anchor with the built path (see certificate findings).")
 	}
+	result.CertificateTransparency = BuildCTSummary(bestState, fullChain)
+	result.Findings = append(result.Findings, ctFindings(result.CertificateTransparency, ip)...)
+
+	var activeFindings []model.Finding
 	if !opts.SkipActiveOCSP {
-		result.Findings = append(result.Findings, checkOCSPURLs(context.Background(), rawChain, opts.FetchHTTP)...)
+		activeFindings = checkOCSPURLs(context.Background(), fullChain, opts.FetchHTTP)
+		result.Findings = append(result.Findings, activeFindings...)
+	}
+	crlCtx, crlCancel := probeContext(timeout)
+	crlFinding, crlStatus := checkCRL(crlCtx, fullChain, opts.FetchHTTP)
+	crlCancel()
+	crlChecked := crlStatus == "good" || crlStatus == "revoked"
+	if crlFinding.Code != "" {
+		result.Findings = append(result.Findings, crlFinding)
+	}
+	if len(fullChain) > 0 {
+		result.Revocation = buildRevocationSummary(fullChain[0], result.OCSPStapled, stapleStatus, activeFindings, crlChecked, crlStatus, !opts.SkipActiveOCSP)
+		if hasMustStaple(fullChain[0]) {
+			result.Findings = append(result.Findings, mustStapleFindings(result.OCSPStapled, stapleStatus, ip)...)
+		}
+		if result.OCSPStapled {
+			result.Findings = append(result.Findings, stapledOCSPFindings(stapleStatus, ip)...)
+		}
+		result.Findings = append(result.Findings, certQualityFindings(fullChain, host, ip)...)
 	}
 }
 
@@ -259,14 +293,6 @@ func appendPostHandshakeFindings(result *model.EndpointResult, host, ip string, 
 			Description: "Server picks cipher order (not client)—normal; ensure server list prioritizes AEAD (GCM/ChaCha) over CBC.",
 			Evidence:    fmt.Sprintf("IP %s negotiated %s with reordered client suites", ip, result.CipherPreference.Observed),
 			ReferenceURL: "https://wiki.mozilla.org/Security/Server_Side_TLS",
-		})
-	}
-	if result.SCTCount == 0 && len(bestState.PeerCertificates) > 0 {
-		result.Findings = append(result.Findings, model.Finding{
-			Code: "CERT-040", Severity: model.SeverityInfo, Title: "No SCTs in handshake",
-			Description: "No embedded SCTs in the cert/handshake—CT may still be satisfied via embedded certs or logs.",
-			Evidence:    fmt.Sprintf("IP %s, leaf serial %s", ip, bestState.PeerCertificates[0].SerialNumber.Text(16)),
-			ReferenceURL: "https://certificate.transparency.dev/",
 		})
 	}
 }
@@ -393,6 +419,14 @@ func analyzeCertificates(host string, chain []*x509.Certificate) (*model.Certifi
 		IsCA: leaf.IsCA,
 		OCSPServers: append([]string(nil), leaf.OCSPServer...),
 		CRLDistribution: append([]string(nil), leaf.CRLDistributionPoints...),
+	}
+	if spkiDER, err := x509.MarshalPKIXPublicKey(leaf.PublicKey); err == nil {
+		h := sha256.Sum256(spkiDER)
+		summary.SPKISHA256 = hex.EncodeToString(h[:])
+	}
+	if len(leaf.Raw) > 0 {
+		h := sha256.Sum256(leaf.Raw)
+		summary.CertSHA256 = hex.EncodeToString(h[:])
 	}
 	for _, c := range chain {
 		summary.ChainSubjects = append(summary.ChainSubjects, util.SubjectLine(c))

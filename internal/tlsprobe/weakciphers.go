@@ -36,6 +36,25 @@ func probeWeakCiphers(parent context.Context, host, port, ip, network string, ti
 	}
 }
 
+func probeInsecureCiphers(parent context.Context, host, port, ip, network string, timeout time.Duration, result *model.EndpointResult, dialer ContextDialer) {
+	_ = parent
+	for _, cs := range tls.InsecureCipherSuites() {
+		ok := trySpecificCipher(parent, host, port, ip, network, timeout, cs.ID, tls.VersionTLS12, dialer)
+		if !ok {
+			continue
+		}
+		name := cs.Name
+		result.WeakCipherSupport = append(result.WeakCipherSupport, name)
+		result.Findings = append(result.Findings, model.Finding{
+			Code: "TLS-051", Severity: model.SeverityCritical, Title: "Insecure TLS cipher accepted",
+			Description: "Server accepted a cipher suite classified as insecure (NULL, export, or anon) in Go’s insecure list.",
+			Evidence: fmt.Sprintf("IP %s accepted %s", ip, name),
+			Remediation: "Disable all NULL, export, and anonymous cipher suites.",
+			ReferenceURL: "https://ssl-config.mozilla.org/",
+		})
+	}
+}
+
 func trySpecificCipher(parent context.Context, host, port, ip, network string, timeout time.Duration, cipher uint16, version uint16, dialer ContextDialer) bool {
 	_ = parent
 	addr := net.JoinHostPort(ip, port)

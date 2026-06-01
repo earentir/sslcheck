@@ -163,5 +163,29 @@ func ConsistencyFindings(endpoints []model.EndpointResult) []model.Finding {
 			ReferenceURL: "https://letsencrypt.org/docs/integration-guide/",
 		})
 	}
+	findings = append(findings, spkiConsistencyFindings(endpoints)...)
 	return findings
+}
+
+func spkiConsistencyFindings(endpoints []model.EndpointResult) []model.Finding {
+	if len(endpoints) < 2 {
+		return nil
+	}
+	bySPKI := map[string][]string{}
+	for _, ep := range endpoints {
+		if !ep.TLSHandshakeOK || ep.CertSummary == nil || ep.CertSummary.SPKISHA256 == "" {
+			continue
+		}
+		bySPKI[ep.CertSummary.SPKISHA256] = append(bySPKI[ep.CertSummary.SPKISHA256], ep.IP)
+	}
+	if len(bySPKI) <= 1 {
+		return nil
+	}
+	return []model.Finding{{
+		Code: "EDGE-005", Severity: model.SeverityMedium, Title: "Different public keys across IPs",
+		Description: "Same hostname resolves to multiple IPs but TLS endpoints present different SPKI fingerprints.",
+		Evidence: util.FormatMapIPs(bySPKI),
+		Remediation: "Serve the same certificate/key on all published addresses unless split is intentional.",
+		ReferenceURL: "https://letsencrypt.org/docs/integration-guide/",
+	}}
 }
