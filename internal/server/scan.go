@@ -35,16 +35,16 @@ func defaultScanOptions() ScanOptions {
 }
 
 // RunScan executes a single-URL scan and returns the report or an error string for HTTP layer.
-func RunScan(ctx context.Context, opts ScanOptions) (*model.Report, int, string) {
+func RunScan(opts ScanOptions) (*model.Report, int, string) {
 	opts.URL = strings.TrimSpace(opts.URL)
 	logx.Debug("RunScan", "url", opts.URL, "profile", opts.Profile, "timeout_sec", opts.TimeoutSeconds)
 	if opts.URL == "" {
 		logx.Warn("RunScan rejected: empty url")
 		return nil, http.StatusBadRequest, "url is required"
 	}
-	if opts.Profile != "modern" && opts.Profile != "strict" {
+	if opts.Profile != "modern" && opts.Profile != "strict" && opts.Profile != "fast" {
 		logx.Warn("RunScan rejected: bad profile", "profile", opts.Profile)
-		return nil, http.StatusBadRequest, "profile must be modern or strict"
+		return nil, http.StatusBadRequest, "profile must be modern, strict, or fast"
 	}
 	if opts.TimeoutSeconds < 5 {
 		opts.TimeoutSeconds = 5
@@ -57,7 +57,8 @@ func RunScan(ctx context.Context, opts ScanOptions) (*model.Report, int, string)
 		logx.Warn("RunScan rejected: bad ip_version", "ip_version", opts.IPVersion)
 		return nil, http.StatusBadRequest, "ip_version must be 4 or 6"
 	}
-	timeout := time.Duration(opts.TimeoutSeconds) * time.Second
+	perPhase := time.Duration(opts.TimeoutSeconds) * time.Second
+
 	runOpts := runner.Options{
 		ProfileName:      opts.Profile,
 		SkipHTTP:         opts.NoHTTP,
@@ -69,8 +70,9 @@ func RunScan(ctx context.Context, opts ScanOptions) (*model.Report, int, string)
 		ScannerVersion:   scannerVersion,
 		ScannerSourceURL: scannerSource,
 	}
-	logx.Info("API scan start", "url", opts.URL, "timeout", timeout.String())
-	rep, err := runner.Run(ctx, opts.URL, timeout, runOpts)
+	logx.Info("API scan start", "url", opts.URL, "per_phase", perPhase.String())
+	// Same as CLI: no request context and no single scan-wide deadline shared across phases.
+	rep, err := runner.Run(context.Background(), opts.URL, perPhase, runOpts)
 	if err != nil {
 		logx.Error("API scan failed", "url", opts.URL, "err", err.Error())
 		return nil, http.StatusBadRequest, err.Error()
@@ -135,8 +137,7 @@ func HandleScanPOST(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid json: %v", err))
 		return
 	}
-	ctx := r.Context()
-	rep, status, msg := RunScan(ctx, opts)
+	rep, status, msg := RunScan(opts)
 	if rep == nil {
 		writeError(w, status, msg)
 		return
@@ -173,8 +174,7 @@ func HandleScanGET(w http.ResponseWriter, r *http.Request) {
 		opts.IPVersion = v
 	}
 
-	ctx := r.Context()
-	rep, status, msg := RunScan(ctx, opts)
+	rep, status, msg := RunScan(opts)
 	if rep == nil {
 		writeError(w, status, msg)
 		return

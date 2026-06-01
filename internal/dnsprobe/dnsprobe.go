@@ -14,6 +14,13 @@ import (
 	"sslcheck/internal/model"
 )
 
+// caaLookupTimeout is independent of scan --timeout so CAA cannot burn the full per-step budget.
+const caaLookupTimeout = 3 * time.Second
+
+// cnameLookupTimeout caps CNAME queries. net.Resolver.LookupCNAME via libc (WSL/systemd-resolved)
+// often ignores context and blocks ~10s; we query CNAME directly instead.
+const cnameLookupTimeout = 2 * time.Second
+
 // ResolveOptions configures how the host name is resolved.
 type ResolveOptions struct {
 	// Server is a custom recursive resolver as host:port (e.g. "1.1.1.1" or "[2001:db8::1]:5353").
@@ -49,7 +56,8 @@ func normalizeDNSServerAddr(user string) string {
 func ResolverForDNSServer(server string) *net.Resolver {
 	addr := normalizeDNSServerAddr(strings.TrimSpace(server))
 	if addr == "" {
-		return net.DefaultResolver
+		// Prefer libc getaddrinfo (same path as curl/dig on Linux), not only the Go resolver.
+		return &net.Resolver{PreferGo: false}
 	}
 	return &net.Resolver{
 		PreferGo: true,
@@ -60,7 +68,7 @@ func ResolverForDNSServer(server string) *net.Resolver {
 	}
 }
 
-func ResolveHost(ctx context.Context, host, port string, opts ResolveOptions) (model.DNSResult, []model.Finding) {
+func ResolveHost(ctx context.Context, host, port string, opts ResolveOptions, timings *[]model.PhaseTiming) (model.DNSResult, []model.Finding) {
 	start := time.Now()
 	var findings []model.Finding
 	result := model.DNSResult{Host: host, Port: port}
@@ -71,6 +79,7 @@ func ResolveHost(ctx context.Context, host, port string, opts ResolveOptions) (m
 	}
 	logx.Debug("DNS lookup", "host", host, "custom_server", strings.TrimSpace(opts.Server) != "", "ip_network", network)
 
+	tResolve := time.Now()
 	var ipList []net.IP
 	var err error
 	switch network {
@@ -85,6 +94,7 @@ func ResolveHost(ctx context.Context, host, port string, opts ResolveOptions) (m
 			}
 		}
 	}
+	recordPhase(timings, "DNS A/AAAA", tResolve)
 	if err != nil {
 		logx.Warn("DNS resolution failed", "host", host, "err", err.Error())
 		findings = append(findings, model.Finding{
@@ -112,16 +122,23 @@ func ResolveHost(ctx context.Context, host, port string, opts ResolveOptions) (m
 	}
 	sort.Strings(result.IPs)
 	logx.Debug("DNS A/AAAA", "host", host, "ips", result.IPs)
+	result.LookupMS = time.Since(tResolve).Milliseconds()
 
-	if cname, err := res.LookupCNAME(ctx, host); err == nil {
-		result.CNAME = strings.TrimSuffix(cname, ".")
+	tCNAME := time.Now()
+	cnameCtx, cnameCancel := context.WithTimeout(context.Background(), cnameLookupTimeout)
+	result.CNAME = lookupCNAMERecord(cnameCtx, host, normalizeDNSServerAddr(opts.Server))
+	cnameCancel()
+	if result.CNAME != "" {
 		logx.Debug("DNS CNAME", "host", host, "cname", result.CNAME)
-	} else {
-		logx.Debug("DNS CNAME lookup", "host", host, "err", err.Error())
 	}
-	result.CAARecords = lookupCAA(ctx, host, normalizeDNSServerAddr(opts.Server))
+	recordPhase(timings, "DNS CNAME", tCNAME)
+
+	tCAA := time.Now()
+	caaCtx, caaCancel := context.WithTimeout(context.Background(), caaLookupTimeout)
+	result.CAARecords = lookupCAA(caaCtx, host, normalizeDNSServerAddr(opts.Server))
+	caaCancel()
+	recordPhase(timings, "DNS CAA", tCAA)
 	logx.Debug("DNS CAA", "host", host, "records", len(result.CAARecords))
-	result.LookupMS = time.Since(start).Milliseconds()
 
 	if len(result.IPs) == 0 {
 		findings = append(findings, model.Finding{
@@ -166,20 +183,14 @@ func ResolveHost(ctx context.Context, host, port string, opts ResolveOptions) (m
 }
 
 func lookupCAA(ctx context.Context, host string, customServerHostPort string) []model.CAARecord {
-	var serverAddr string
-	if customServerHostPort != "" {
-		serverAddr = customServerHostPort
-	} else {
-		cfg, err := dns.ClientConfigFromFile("/etc/resolv.conf")
-		if err != nil || len(cfg.Servers) == 0 {
-			return nil
-		}
-		serverAddr = net.JoinHostPort(cfg.Servers[0], cfg.Port)
+	serverAddr := dnsServerAddr(customServerHostPort)
+	if serverAddr == "" {
+		return nil
 	}
 
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(host), dns.TypeCAA)
-	client := &dns.Client{}
+	client := &dns.Client{Timeout: caaLookupTimeout}
 	in, _, err := client.ExchangeContext(ctx, msg, serverAddr)
 	if err != nil {
 		return nil
@@ -194,4 +205,45 @@ func lookupCAA(ctx context.Context, host string, customServerHostPort string) []
 		})
 	}
 	return out
+}
+
+func lookupCNAMERecord(ctx context.Context, host string, customServerHostPort string) string {
+	serverAddr := dnsServerAddr(customServerHostPort)
+	if serverAddr == "" {
+		return ""
+	}
+	msg := new(dns.Msg)
+	msg.SetQuestion(dns.Fqdn(host), dns.TypeCNAME)
+	client := &dns.Client{Timeout: cnameLookupTimeout}
+	in, _, err := client.ExchangeContext(ctx, msg, serverAddr)
+	if err != nil || in == nil {
+		return ""
+	}
+	for _, ans := range in.Answer {
+		if cname, ok := ans.(*dns.CNAME); ok {
+			return strings.TrimSuffix(cname.Target, ".")
+		}
+	}
+	return ""
+}
+
+func dnsServerAddr(customServerHostPort string) string {
+	if customServerHostPort != "" {
+		return customServerHostPort
+	}
+	cfg, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+	if err != nil || len(cfg.Servers) == 0 {
+		return ""
+	}
+	return net.JoinHostPort(cfg.Servers[0], cfg.Port)
+}
+
+func recordPhase(timings *[]model.PhaseTiming, name string, start time.Time) {
+	if timings == nil {
+		return
+	}
+	*timings = append(*timings, model.PhaseTiming{
+		Name:       name,
+		DurationMS: time.Since(start).Milliseconds(),
+	})
 }

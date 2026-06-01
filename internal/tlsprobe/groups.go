@@ -11,9 +11,7 @@ import (
 )
 
 func probeSupportedGroups(parent context.Context, host, port, ip, network string, timeout time.Duration, dialer ContextDialer) []model.Finding {
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
+	_ = parent
 	tests := []struct {
 		Name string
 		Group tls.CurveID
@@ -37,11 +35,9 @@ func probeSupportedGroups(parent context.Context, host, port, ip, network string
 }
 
 func tryCurve(parent context.Context, host, port, ip, network string, timeout time.Duration, group tls.CurveID, dialer ContextDialer) (bool, error) {
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
+	_ = parent
 	addr := net.JoinHostPort(ip, port)
-	rawConn, err := dialer.DialContext(parent, network, addr)
+	rawConn, err := dialTCP(dialer, timeout, network, addr)
 	if err != nil { return false, err }
 	defer rawConn.Close()
 	cfg := &tls.Config{

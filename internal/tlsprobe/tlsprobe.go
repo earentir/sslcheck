@@ -27,7 +27,9 @@ type ContextDialer interface {
 
 type Options struct {
 	SkipActiveOCSP bool
-	DialContext    ContextDialer // optional; when set, used for all TCP dials (e.g. via proxy)
+	// Fast skips deep TLS matrix probes (weak ciphers, resumption, ALPN matrix, SNI matrix, curves, fallback SCSV).
+	Fast        bool
+	DialContext ContextDialer // optional; when set, used for all TCP dials (e.g. via proxy)
 	// FetchHTTP is used for AIA and active OCSP HTTP requests; should use the same DNS policy as the scan.
 	FetchHTTP *http.Client
 }
@@ -38,14 +40,15 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 		IP: ip, Network: network, ProtocolSupport: make(map[string]bool),
 	}
 
-	addr := net.JoinHostPort(ip, port)
 	dialer := opts.DialContext
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
+	if opts.Fast {
+		return probeEndpointFast(host, port, ip, network, timeout, dialer, opts)
 	}
+
+	addr := net.JoinHostPort(ip, port)
 	logx.Debug("TLS TCP dial", "host", host, "ip", ip, "addr", addr, "network", network)
 	start := time.Now()
-	tcpConn, err := dialer.DialContext(parent, network, addr)
+	tcpConn, err := dialTCP(dialer, timeout, network, addr)
 	if err != nil {
 		logx.Warn("TLS TCP failed", "host", host, "ip", ip, "err", err.Error())
 		result.Errors = append(result.Errors, "tcp connect failed: "+err.Error())
@@ -58,19 +61,28 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 	_ = tcpConn.Close()
 
 	logx.Debug("probe protocol versions", "ip", ip)
-	probeProtocolVersions(parent, host, port, ip, network, timeout, &result, dialer)
-	logx.Debug("probe weak ciphers", "ip", ip)
-	probeWeakCiphers(parent, host, port, ip, network, timeout, &result, dialer)
+	var bestState tls.ConnectionState
+	var rawChain []*x509.Certificate
+	var bestErr error
+
+	runParallelTasks(
+		func() {
+			probeProtocolVersions(parent, host, port, ip, network, timeout, &result, dialer)
+			probeWeakCiphers(parent, host, port, ip, network, timeout, &result, dialer)
+		},
+		func() {
+			bestState, rawChain, bestErr = probeBestHandshake(parent, host, port, ip, network, timeout, dialer)
+		},
+	)
 
 	logx.Debug("TLS best handshake", "ip", ip, "sni", host)
-	bestState, rawChain, err := probeBestHandshake(parent, host, port, ip, network, timeout, dialer)
-	if err != nil {
-		logx.Warn("TLS handshake failed", "ip", ip, "err", err.Error())
-		result.Errors = append(result.Errors, "tls handshake failed: "+err.Error())
+	if bestErr != nil {
+		logx.Warn("TLS handshake failed", "ip", ip, "err", bestErr.Error())
+		result.Errors = append(result.Errors, "tls handshake failed: "+bestErr.Error())
 		result.Findings = append(result.Findings, model.Finding{
 			Code: "TLS-001", Severity: model.SeverityCritical, Title: "TLS handshake failed",
 			Description: "Could not complete TLS with this IP after TCP connected—often wrong cert/SNI, TLS disabled on this vhost, or cipher/protocol mismatch.",
-			Evidence: fmt.Sprintf("IP %s, SNI %q, error: %v", ip, host, err),
+			Evidence:    fmt.Sprintf("IP %s, SNI %q, error: %v", ip, host, bestErr),
 			Remediation: "On the server: enable TLS on 443, set correct ServerName/SNI vhost, allow TLS 1.2+, and present a valid chain for this hostname.",
 			ReferenceURL: "https://wiki.mozilla.org/Security/Server_Side_TLS",
 		})
@@ -78,15 +90,83 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 		return result
 	}
 
+	applyBestHandshake(&result, host, ip, bestState, rawChain, timeout, dialer, opts)
+
+	var alpn *model.ALPNResult
+	var resumption *model.ResumptionResult
+	var cipherPref *model.CipherPreferenceResult
+	var wrongSNI []model.Finding
+	var groupFindings []model.Finding
+
+	runParallelTasks(
+		func() { alpn = probeALPN(parent, host, port, ip, network, timeout, dialer) },
+		func() { resumption = probeResumption(parent, host, port, ip, network, timeout, dialer) },
+		func() { cipherPref = probeCipherPreference(parent, host, port, ip, network, timeout, dialer) },
+		func() { wrongSNI = probeWrongSNI(parent, host, port, ip, network, timeout, dialer) },
+		func() { groupFindings = probeSupportedGroups(parent, host, port, ip, network, timeout, dialer) },
+	)
+
+	result.ALPNProbe = alpn
+	result.Resumption = resumption
+	result.CipherPreference = cipherPref
+	probeNoSNI(parent, host, port, ip, network, timeout, &result, dialer)
+	result.Findings = append(result.Findings, wrongSNI...)
+	result.Findings = append(result.Findings, groupFindings...)
+	probeTLSFallbackSCSV(parent, host, port, ip, network, timeout, &result, dialer)
+
+	appendPostHandshakeFindings(&result, host, ip, bestState)
+	model.SortFindings(result.Findings)
+	return result
+}
+
+func probeEndpointFast(host, port, ip, network string, timeout time.Duration, dialer ContextDialer, opts Options) model.EndpointResult {
+	result := model.EndpointResult{
+		IP: ip, Network: network, ProtocolSupport: make(map[string]bool),
+	}
+	logx.Debug("TLS fast probe", "ip", ip)
+	bestState, rawChain, err := probeBestHandshake(context.Background(), host, port, ip, network, timeout, dialer)
+	if err != nil {
+		logx.Warn("TLS handshake failed", "ip", ip, "err", err.Error())
+		result.Errors = append(result.Errors, "tls handshake failed: "+err.Error())
+		result.Findings = append(result.Findings, model.Finding{
+			Code: "TLS-001", Severity: model.SeverityCritical, Title: "TLS handshake failed",
+			Description: "Could not complete TLS with this IP after TCP connected—often wrong cert/SNI, TLS disabled on this vhost, or cipher/protocol mismatch.",
+			Evidence:    fmt.Sprintf("IP %s, SNI %q, error: %v", ip, host, err),
+			Remediation: "On the server: enable TLS on 443, set correct ServerName/SNI vhost, allow TLS 1.2+, and present a valid chain for this hostname.",
+			ReferenceURL: "https://wiki.mozilla.org/Security/Server_Side_TLS",
+		})
+		return result
+	}
+	result.TCPReachable = true
+	applyBestHandshake(&result, host, ip, bestState, rawChain, timeout, dialer, opts)
+	setProtocolSupportFromBest(&result, bestState.Version)
+	if bestState.Version <= tls.VersionTLS11 {
+		result.Findings = append(result.Findings, model.Finding{
+			Code: "TLS-010", Severity: model.SeverityCritical, Title: "Legacy TLS negotiated",
+			Description: "The best handshake used TLS 1.0 or 1.1, which are deprecated and unsafe for HTTPS.",
+			Evidence:    fmt.Sprintf("IP %s negotiated %s (cipher %s)", ip, result.TLSVersion, result.CipherSuite),
+			Remediation: "Set minimum TLS to 1.2 (prefer 1.3). Remove TLS 1.0/1.1 from all listeners and load balancers.",
+			ReferenceURL: "https://ssl-config.mozilla.org/",
+		})
+	}
+	model.SortFindings(result.Findings)
+	return result
+}
+
+func setProtocolSupportFromBest(result *model.EndpointResult, version uint16) {
+	result.ProtocolSupport["TLS1.0"] = version == tls.VersionTLS10
+	result.ProtocolSupport["TLS1.1"] = version == tls.VersionTLS11
+	result.ProtocolSupport["TLS1.2"] = version == tls.VersionTLS12
+	result.ProtocolSupport["TLS1.3"] = version == tls.VersionTLS13
+}
+
+func applyBestHandshake(result *model.EndpointResult, host, ip string, bestState tls.ConnectionState, rawChain []*x509.Certificate, timeout time.Duration, _ ContextDialer, opts Options) {
 	result.TLSHandshakeOK = true
 	logx.Info("TLS handshake OK", "ip", ip, "version", util.TLSVersionString(bestState.Version), "cipher", tls.CipherSuiteName(bestState.CipherSuite), "alpn", bestState.NegotiatedProtocol, "peer_certs", len(bestState.PeerCertificates))
 	result.TLSVersion = util.TLSVersionString(bestState.Version)
 	result.CipherSuite = tls.CipherSuiteName(bestState.CipherSuite)
 	result.ServerName = bestState.ServerName
 	result.ALPN = bestState.NegotiatedProtocol
-	result.ALPNProbe = probeALPN(parent, host, port, ip, network, timeout, dialer)
-	result.Resumption = probeResumption(parent, host, port, ip, network, timeout, dialer)
-	result.CipherPreference = probeCipherPreference(parent, host, port, ip, network, timeout, dialer)
 	result.PeerCertCount = len(bestState.PeerCertificates)
 	result.OCSPStapled = len(bestState.OCSPResponse) > 0
 	result.SCTCount = len(bestState.SignedCertificateTimestamps)
@@ -101,14 +181,16 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 		result.Findings = append(result.Findings, model.Finding{
 			Code: "TLS-021", Severity: model.SeverityInfo, Title: "OCSP stapling not offered",
 			Description: "The leaf cert lists an OCSP URL, but the TLS handshake had no stapled OCSP response—clients must query the CA instead.",
-			Evidence: fmt.Sprintf("IP %s · OCSP URLs on cert: %s", ip, strings.Join(bestState.PeerCertificates[0].OCSPServer, ", ")),
+			Evidence:    fmt.Sprintf("IP %s · OCSP URLs on cert: %s", ip, strings.Join(bestState.PeerCertificates[0].OCSPServer, ", ")),
 			Remediation: "Enable OCSP stapling in your web server (e.g. nginx ssl_stapling, Apache SSLUseStapling).",
 			ReferenceURL: "https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides/TLS#ocsp_stapling",
 		})
 	}
 
 	logx.Debug("chain build AIA extend", "ip", ip, "raw_certs", len(rawChain))
-	chainBuild := ExtendChainWithAIA(parent, host, rawChain, timeout, opts.FetchHTTP)
+	aiaCtx, aiaCancel := probeContext(timeout)
+	chainBuild := ExtendChainWithAIA(aiaCtx, host, rawChain, timeout, opts.FetchHTTP)
+	aiaCancel()
 	logx.Debug("chain build result", "ip", ip, "full_len", len(chainBuild.Chain), "verified", chainBuild.VerifiedOK, "notes", len(chainBuild.Notes))
 	fullChain := chainBuild.Chain
 	summary, certFindings := analyzeCertificates(host, fullChain)
@@ -122,14 +204,16 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 			"Chain not fully verified to a system trust anchor with the built path (see certificate findings).")
 	}
 	if !opts.SkipActiveOCSP {
-		result.Findings = append(result.Findings, checkOCSPURLs(parent, rawChain, opts.FetchHTTP)...)
+		result.Findings = append(result.Findings, checkOCSPURLs(context.Background(), rawChain, opts.FetchHTTP)...)
 	}
+}
 
+func appendPostHandshakeFindings(result *model.EndpointResult, host, ip string, bestState tls.ConnectionState) {
 	if bestState.Version <= tls.VersionTLS11 {
 		result.Findings = append(result.Findings, model.Finding{
 			Code: "TLS-010", Severity: model.SeverityCritical, Title: "Legacy TLS negotiated",
 			Description: "The best handshake used TLS 1.0 or 1.1, which are deprecated and unsafe for HTTPS.",
-			Evidence: fmt.Sprintf("IP %s negotiated %s (cipher %s)", ip, result.TLSVersion, result.CipherSuite),
+			Evidence:    fmt.Sprintf("IP %s negotiated %s (cipher %s)", ip, result.TLSVersion, result.CipherSuite),
 			Remediation: "Set minimum TLS to 1.2 (prefer 1.3). Remove TLS 1.0/1.1 from all listeners and load balancers.",
 			ReferenceURL: "https://ssl-config.mozilla.org/",
 		})
@@ -138,7 +222,7 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 		result.Findings = append(result.Findings, model.Finding{
 			Code: "TLS-020", Severity: model.SeverityInfo, Title: "No ALPN negotiated",
 			Description: "ALPN was empty after handshake—common for non-HTTP TLS or very old stacks; HTTP/2 over TLS usually needs h2 in ALPN.",
-			Evidence: fmt.Sprintf("IP %s, SNI %q — negotiated ALPN: (empty)", ip, host),
+			Evidence:    fmt.Sprintf("IP %s, SNI %q — negotiated ALPN: (empty)", ip, host),
 			ReferenceURL: "https://developer.mozilla.org/en-US/docs/Glossary/ALPN",
 		})
 	}
@@ -146,7 +230,7 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 		result.Findings = append(result.Findings, model.Finding{
 			Code: "TLS-022", Severity: model.SeverityInfo, Title: "HTTP/2 ALPN not negotiated",
 			Description: "We offered only h2; server did not select it—this IP may be serving HTTP/1.1-only over TLS or rejecting the probe.",
-			Evidence: fmt.Sprintf("IP %s", ip),
+			Evidence:    fmt.Sprintf("IP %s", ip),
 			Remediation: "Enable HTTP/2 (and ALPN h2) if you want H2 on this endpoint.",
 			ReferenceURL: "https://developer.mozilla.org/en-US/docs/Glossary/HTTP_2",
 		})
@@ -156,7 +240,7 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 			result.Findings = append(result.Findings, model.Finding{
 				Code: "TLS-060", Severity: model.SeverityInfo, Title: "TLS 1.2 session resumption not observed",
 				Description: "Second handshake did not show TLS 1.2 resumption (tickets/IDs)—may still work with different timing or server policy.",
-				Evidence: fmt.Sprintf("IP %s", ip),
+				Evidence:    fmt.Sprintf("IP %s", ip),
 				ReferenceURL: "https://wiki.openssl.org/index.php/TLS1.3#Session_Resumption",
 			})
 		}
@@ -164,7 +248,7 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 			result.Findings = append(result.Findings, model.Finding{
 				Code: "TLS-061", Severity: model.SeverityInfo, Title: "TLS 1.3 session resumption not observed",
 				Description: "TLS 1.3 PSK/ticket resumption was not observed on retry—not always a misconfiguration.",
-				Evidence: fmt.Sprintf("IP %s", ip),
+				Evidence:    fmt.Sprintf("IP %s", ip),
 				ReferenceURL: "https://www.rfc-editor.org/rfc/rfc8446#section-2.2",
 			})
 		}
@@ -173,30 +257,24 @@ func ProbeEndpoint(parent context.Context, host, port, ip string, timeout time.D
 		result.Findings = append(result.Findings, model.Finding{
 			Code: "TLS-090", Severity: model.SeverityInfo, Title: "Server cipher preference observed",
 			Description: "Server picks cipher order (not client)—normal; ensure server list prioritizes AEAD (GCM/ChaCha) over CBC.",
-			Evidence: fmt.Sprintf("IP %s negotiated %s with reordered client suites", ip, result.CipherPreference.Observed),
+			Evidence:    fmt.Sprintf("IP %s negotiated %s with reordered client suites", ip, result.CipherPreference.Observed),
 			ReferenceURL: "https://wiki.mozilla.org/Security/Server_Side_TLS",
 		})
 	}
-	if result.SCTCount == 0 {
+	if result.SCTCount == 0 && len(bestState.PeerCertificates) > 0 {
 		result.Findings = append(result.Findings, model.Finding{
 			Code: "CERT-040", Severity: model.SeverityInfo, Title: "No SCTs in handshake",
 			Description: "No embedded SCTs in the cert/handshake—CT may still be satisfied via embedded certs or logs.",
-			Evidence: fmt.Sprintf("IP %s, leaf serial %s", ip, bestState.PeerCertificates[0].SerialNumber.Text(16)),
+			Evidence:    fmt.Sprintf("IP %s, leaf serial %s", ip, bestState.PeerCertificates[0].SerialNumber.Text(16)),
 			ReferenceURL: "https://certificate.transparency.dev/",
 		})
 	}
-
-	probeNoSNI(parent, host, port, ip, network, timeout, &result, dialer)
-	result.Findings = append(result.Findings, probeWrongSNI(parent, host, port, ip, network, timeout, dialer)...)
-	result.Findings = append(result.Findings, probeSupportedGroups(parent, host, port, ip, network, timeout, dialer)...)
-	probeTLSFallbackSCSV(parent, host, port, ip, network, timeout, &result, dialer)
-	model.SortFindings(result.Findings)
-	return result
 }
 
 func probeProtocolVersions(parent context.Context, host, port, ip, network string, timeout time.Duration, result *model.EndpointResult, dialer ContextDialer) {
+	_ = parent
 	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
+		dialer = defaultDialer(timeout)
 	}
 	versions := []struct{ Name string; ID uint16 }{
 		{"TLS1.0", tls.VersionTLS10}, {"TLS1.1", tls.VersionTLS11},
@@ -209,7 +287,7 @@ func probeProtocolVersions(parent context.Context, host, port, ip, network strin
 			result.Findings = append(result.Findings, model.Finding{
 				Code: "TLS-011", Severity: model.SeverityCritical, Title: "Legacy TLS version supported",
 				Description: "A separate probe confirmed this IP still completes handshakes on TLS 1.0/1.1—downgrade attacks become possible.",
-				Evidence: fmt.Sprintf("IP %s accepts %s (dedicated version probe)", ip, v.Name),
+				Evidence:    fmt.Sprintf("IP %s accepts %s (dedicated version probe)", ip, v.Name),
 				Remediation: "Disable TLS 1.0 and 1.1 everywhere (LB + origin).",
 				ReferenceURL: "https://ssl-config.mozilla.org/",
 			})
@@ -219,7 +297,7 @@ func probeProtocolVersions(parent context.Context, host, port, ip, network strin
 		result.Findings = append(result.Findings, model.Finding{
 			Code: "TLS-012", Severity: model.SeverityCritical, Title: "No modern TLS support",
 			Description: "Neither TLS 1.2 nor 1.3 completed in our version probes—browsers will fail or use only legacy TLS.",
-			Evidence: fmt.Sprintf("IP %s protocol map: %+v", ip, result.ProtocolSupport),
+			Evidence:    fmt.Sprintf("IP %s protocol map: %+v", ip, result.ProtocolSupport),
 			Remediation: "Enable TLS 1.2 minimum; add TLS 1.3 where possible.",
 			ReferenceURL: "https://ssl-config.mozilla.org/",
 		})
@@ -227,11 +305,9 @@ func probeProtocolVersions(parent context.Context, host, port, ip, network strin
 }
 
 func tryTLSVersion(parent context.Context, host, port, ip, network string, timeout time.Duration, version uint16, dialer ContextDialer) bool {
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
+	_ = parent
 	addr := net.JoinHostPort(ip, port)
-	rawConn, err := dialer.DialContext(parent, network, addr)
+	rawConn, err := dialTCP(dialer, timeout, network, addr)
 	if err != nil { return false }
 	defer rawConn.Close()
 	cfg := &tls.Config{
@@ -244,11 +320,9 @@ func tryTLSVersion(parent context.Context, host, port, ip, network string, timeo
 }
 
 func probeBestHandshake(parent context.Context, host, port, ip, network string, timeout time.Duration, dialer ContextDialer) (tls.ConnectionState, []*x509.Certificate, error) {
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
+	_ = parent
 	addr := net.JoinHostPort(ip, port)
-	rawConn, err := dialer.DialContext(parent, network, addr)
+	rawConn, err := dialTCP(dialer, timeout, network, addr)
 	if err != nil { return tls.ConnectionState{}, nil, err }
 	defer rawConn.Close()
 
@@ -264,11 +338,9 @@ func probeBestHandshake(parent context.Context, host, port, ip, network string, 
 }
 
 func probeNoSNI(parent context.Context, host, port, ip, network string, timeout time.Duration, result *model.EndpointResult, dialer ContextDialer) {
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
+	_ = parent
 	addr := net.JoinHostPort(ip, port)
-	rawConn, err := dialer.DialContext(parent, network, addr)
+	rawConn, err := dialTCP(dialer, timeout, network, addr)
 	if err != nil { result.TLSErrorNoSNI = err.Error(); return }
 	defer rawConn.Close()
 

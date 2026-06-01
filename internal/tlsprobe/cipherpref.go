@@ -10,9 +10,7 @@ import (
 )
 
 func probeCipherPreference(parent context.Context, host, port, ip, network string, timeout time.Duration, dialer ContextDialer) *model.CipherPreferenceResult {
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
+	_ = parent
 	a, okA := tryCipherOrder(parent, host, port, ip, network, timeout, []uint16{
 		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 		tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
@@ -32,8 +30,9 @@ func probeCipherPreference(parent context.Context, host, port, ip, network strin
 }
 
 func tryCipherOrder(parent context.Context, host, port, ip, network string, timeout time.Duration, suites []uint16, dialer ContextDialer) (uint16, bool) {
+	_ = parent
 	addr := net.JoinHostPort(ip, port)
-	rawConn, err := dialer.DialContext(parent, network, addr)
+	rawConn, err := dialTCP(dialer, timeout, network, addr)
 	if err != nil { return 0, false }
 	defer rawConn.Close()
 

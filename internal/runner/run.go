@@ -2,9 +2,11 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -17,6 +19,12 @@ import (
 	"sslcheck/internal/tlsprobe"
 	"sslcheck/internal/util"
 )
+
+// phaseContext gives each scan step its own deadline. Parent is ignored for timing so a slow DNS
+// phase cannot cause later HTTP/TLS to fail instantly with "context deadline exceeded".
+func phaseContext(_ context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), timeout)
+}
 
 type Options struct {
 	ProfileName    string
@@ -52,13 +60,18 @@ func Run(parent context.Context, rawURL string, timeout time.Duration, opts Opti
 	}
 	logx.Info("target resolved", "url", u.String(), "host", host, "port", port)
 
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
-
 	report := &model.Report{
-		URL: u.String(),
+		URL:  u.String(),
 		Host: host,
 		Port: port,
+		PhaseTimings: []model.PhaseTiming{},
+	}
+
+	recordPhase := func(name string, start time.Time) {
+		report.PhaseTimings = append(report.PhaseTimings, model.PhaseTiming{
+			Name:       name,
+			DurationMS: time.Since(start).Milliseconds(),
+		})
 	}
 
 	dnsOpts := dnsprobe.ResolveOptions{Server: opts.DNSServer}
@@ -68,21 +81,39 @@ func Run(parent context.Context, rawURL string, timeout time.Duration, opts Opti
 	case "6":
 		dnsOpts.IPNetwork = "ip6"
 	}
-	report.DNS, report.Findings = dnsprobe.ResolveHost(ctx, host, port, dnsOpts)
+	dnsCtx, dnsCancel := phaseContext(parent, timeout)
+	report.DNS, report.Findings = dnsprobe.ResolveHost(dnsCtx, host, port, dnsOpts, &report.PhaseTimings)
+	dnsCancel()
 	logx.Info("DNS phase done", "host", host, "ip_count", len(report.DNS.IPs), "lookup_ms", report.DNS.LookupMS, "findings", len(report.Findings))
 
 	resolver := dnsprobe.ResolverForDNSServer(opts.DNSServer)
 	ipVer := strings.TrimSpace(opts.IPVersion)
+	fastScan := opts.ProfileName == "fast"
 
 	if !opts.SkipHTTP {
 		logx.Debug("HTTP probes starting", "host", host)
-		report.Redirect = httpprobe.ProbeRedirect(ctx, u, resolver, ipVer)
+		t := time.Now()
+		redCtx, redCancel := phaseContext(parent, timeout)
+		report.Redirect = httpprobe.ProbeRedirect(redCtx, u, resolver, ipVer)
+		redCancel()
+		recordPhase("HTTP redirect (port 80)", t)
 		report.Findings = append(report.Findings, httpprobe.RedirectFindings(report.Redirect)...)
-		chain, errStr := httpprobe.ProbeRedirectChain(ctx, u, resolver, ipVer)
-		report.RedirectChain = chain
-		report.Findings = append(report.Findings, httpprobe.RedirectChainFindings(chain, errStr, host)...)
 
-		report.HTTP = httpprobe.ProbeHTTPS(ctx, u, timeout, resolver, ipVer)
+		if !fastScan {
+			t = time.Now()
+			chainCtx, chainCancel := phaseContext(parent, timeout)
+			chain, errStr := httpprobe.ProbeRedirectChain(chainCtx, u, resolver, ipVer)
+			chainCancel()
+			recordPhase("HTTP redirect chain", t)
+			report.RedirectChain = chain
+			report.Findings = append(report.Findings, httpprobe.RedirectChainFindings(chain, errStr, host)...)
+		}
+
+		t = time.Now()
+		httpsCtx, httpsCancel := phaseContext(parent, timeout)
+		report.HTTP = httpprobe.ProbeHTTPS(httpsCtx, u, timeout, resolver, ipVer, fastScan)
+		httpsCancel()
+		recordPhase("HTTPS GET", t)
 		report.Findings = append(report.Findings, httpprobe.HTTPSFindings(report.HTTP)...)
 		logx.Info("HTTP probes done", "host", host, "https_err", report.HTTP.Error != "", "redirect_chain_len", len(report.RedirectChain))
 	} else {
@@ -96,6 +127,7 @@ func Run(parent context.Context, rawURL string, timeout time.Duration, opts Opti
 	}
 	tlsOpts := tlsprobe.Options{
 		SkipActiveOCSP: opts.SkipActiveOCSP,
+		Fast:           fastScan,
 		FetchHTTP:      httpprobe.FetchHTTPClient(timeout, resolver, ipVer),
 	}
 	if opts.ProxyURL != "" {
@@ -107,11 +139,43 @@ func Run(parent context.Context, rawURL string, timeout time.Duration, opts Opti
 		}
 		tlsOpts.DialContext = dialer
 	}
-	for _, ip := range ips {
-		logx.Info("TLS probe endpoint", "host", host, "ip", ip, "port", port)
-		ep := tlsprobe.ProbeEndpoint(ctx, host, port, ip, timeout, tlsOpts)
-		report.Endpoints = append(report.Endpoints, ep)
-		report.Findings = append(report.Findings, ep.Findings...)
+	probeOneIP := func(ip string) model.EndpointResult {
+		t := time.Now()
+		ep := tlsprobe.ProbeEndpoint(context.Background(), host, port, ip, timeout, tlsOpts)
+		recordPhase(fmt.Sprintf("TLS probe %s", ip), t)
+		return ep
+	}
+	if len(ips) <= 1 {
+		for _, ip := range ips {
+			logx.Info("TLS probe endpoint", "host", host, "ip", ip, "port", port)
+			ep := probeOneIP(ip)
+			report.Endpoints = append(report.Endpoints, ep)
+			report.Findings = append(report.Findings, ep.Findings...)
+		}
+	} else {
+		endpoints := make([]model.EndpointResult, len(ips))
+		var phaseMu sync.Mutex
+		var wg sync.WaitGroup
+		for i, ip := range ips {
+			logx.Info("TLS probe endpoint", "host", host, "ip", ip, "port", port)
+			wg.Add(1)
+			go func(i int, ip string) {
+				defer wg.Done()
+				t := time.Now()
+				endpoints[i] = tlsprobe.ProbeEndpoint(context.Background(), host, port, ip, timeout, tlsOpts)
+				phaseMu.Lock()
+				report.PhaseTimings = append(report.PhaseTimings, model.PhaseTiming{
+					Name:       fmt.Sprintf("TLS probe %s", ip),
+					DurationMS: time.Since(t).Milliseconds(),
+				})
+				phaseMu.Unlock()
+			}(i, ip)
+		}
+		wg.Wait()
+		for _, ep := range endpoints {
+			report.Endpoints = append(report.Endpoints, ep)
+			report.Findings = append(report.Findings, ep.Findings...)
+		}
 	}
 	augmentNET002WhenOtherFamilyWorks(report)
 
@@ -128,8 +192,10 @@ func Run(parent context.Context, rawURL string, timeout time.Duration, opts Opti
 	}
 
 	logx.Debug("policy consistency", "endpoints", len(report.Endpoints))
+	t := time.Now()
 	report.Findings = append(report.Findings, policy.ConsistencyFindings(report.Endpoints)...)
 	report.Findings = append(report.Findings, policy.ApplyProfile(report, policy.ProfileByName(opts.ProfileName))...)
+	recordPhase("Policy & finalize", t)
 	model.SortFindings(report.Findings)
 	logx.Debug("runner.Run complete", "overall", report.Overall, "total_findings", len(report.Findings), "elapsed_ms", time.Since(start).Milliseconds())
 	report.StartedAt = start.UTC().Format(time.RFC3339)

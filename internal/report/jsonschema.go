@@ -23,6 +23,16 @@ func JSONSchema() ([]byte, error) {
 			"started_at": {Type: "string"},
 			"finished_at": {Type: "string"},
 			"duration_ms": {Type: "integer"},
+			"phase_timings": {
+				Type: "array",
+				Items: &Field{
+					Type: "object",
+					Properties: map[string]Field{
+						"name":        {Type: "string"},
+						"duration_ms": {Type: "integer"},
+					},
+				},
+			},
 			"redirect_chain": {Type: "array", Items: &Field{Type: "string"}},
 			"findings": {
 				Type: "array",

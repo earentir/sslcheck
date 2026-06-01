@@ -31,9 +31,22 @@ func StrictProfile() Profile {
 	}
 }
 
+func FastProfile() Profile {
+	return Profile{
+		Name: "fast", RequireHSTS: false, RequireCAA: false, RequireTLS13Or12: true,
+		ForbidLegacyTLS: true, ForbidWeakCiphers: true, RequireModernHeaders: false,
+	}
+}
+
 func ProfileByName(name string) Profile {
-	if name == "strict" { return StrictProfile() }
-	return ModernProfile()
+	switch name {
+	case "strict":
+		return StrictProfile()
+	case "fast":
+		return FastProfile()
+	default:
+		return ModernProfile()
+	}
 }
 
 func ApplyProfile(report *model.Report, profile Profile) []model.Finding {

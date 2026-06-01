@@ -10,9 +10,7 @@ import (
 )
 
 func probeResumption(parent context.Context, host, port, ip, network string, timeout time.Duration, dialer ContextDialer) *model.ResumptionResult {
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
+	_ = parent
 	return &model.ResumptionResult{
 		TLS12Attempted: true,
 		TLS12Resumed:   tryResumption(parent, host, port, ip, network, timeout, tls.VersionTLS12, dialer),
@@ -31,11 +29,9 @@ func tryResumption(parent context.Context, host, port, ip, network string, timeo
 }
 
 func resumedHandshake(parent context.Context, host, port, ip, network string, timeout time.Duration, version uint16, cache tls.ClientSessionCache, dialer ContextDialer) (bool, error) {
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
+	_ = parent
 	addr := net.JoinHostPort(ip, port)
-	rawConn, err := dialer.DialContext(parent, network, addr)
+	rawConn, err := dialTCP(dialer, timeout, network, addr)
 	if err != nil { return false, err }
 	defer rawConn.Close()
 

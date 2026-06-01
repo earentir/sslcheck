@@ -183,6 +183,11 @@ type EndpointResult struct {
 	ChainBuildNotes         []string                 `json:"chain_build_notes,omitempty"`
 }
 
+type PhaseTiming struct {
+	Name       string `json:"name"`
+	DurationMS int64  `json:"duration_ms"`
+}
+
 type Report struct {
 	URL           string             `json:"url"`
 	Host          string             `json:"host"`
@@ -206,6 +211,8 @@ type Report struct {
 	ScannerVersion string `json:"scanner_version,omitempty"`
 	// ScannerSource is the project URL (API/JSON).
 	ScannerSource string `json:"scanner_source,omitempty"`
+	// PhaseTimings is per-step wall time (always last in JSON output).
+	PhaseTimings []PhaseTiming `json:"phase_timings"`
 }
 
 func SeverityRank(s Severity) int {

@@ -35,12 +35,13 @@ const (
 // Render formats the report as plain text. If useColor is true, overall result,
 // section headers, and finding severities are colored for terminal output.
 // If verbose is true, full redirect chain and extra detail are included.
-func Render(rep *model.Report, useColor bool, verbose bool) string {
+// If debug is true, a scan phase timing table is appended at the end.
+func Render(rep *model.Report, useColor bool, verbose bool, debug bool) string {
 	var c *colors
 	if useColor {
 		c = &colors{}
 	}
-	return render(rep, c, verbose)
+	return render(rep, c, verbose, debug)
 }
 
 // Grade returns an SSL Labs-style letter grade (A+ through F) from the report overall and findings.
@@ -138,7 +139,7 @@ func (c *colors) section(title string) string {
 	return ansiBold + title + ansiReset
 }
 
-func render(rep *model.Report, c *colors, verbose bool) string {
+func render(rep *model.Report, c *colors, verbose bool, debug bool) string {
 	var b strings.Builder
 	overallStr := rep.Overall
 	if c != nil {
@@ -343,22 +344,27 @@ func render(rep *model.Report, c *colors, verbose bool) string {
 	fmt.Fprintf(&b, "\n%s\n", sec)
 	if len(rep.Findings) == 0 {
 		fmt.Fprintf(&b, "  none\n")
-		return b.String()
+	} else {
+		for _, f := range rep.Findings {
+			sevStr := strings.ToUpper(string(f.Severity))
+			if c != nil {
+				sevStr = c.severity(f.Severity, sevStr)
+			}
+			fmt.Fprintf(&b, "  [%s] %s %s\n    %s\n", sevStr, f.Code, f.Title, f.Description)
+			if f.Evidence != "" {
+				fmt.Fprintf(&b, "    Evidence: %s\n", f.Evidence)
+			}
+			if f.Remediation != "" {
+				fmt.Fprintf(&b, "    Remediation: %s\n", f.Remediation)
+			}
+			if f.ReferenceURL != "" {
+				fmt.Fprintf(&b, "    Reference: %s\n", f.ReferenceURL)
+			}
+		}
 	}
-	for _, f := range rep.Findings {
-		sevStr := strings.ToUpper(string(f.Severity))
-		if c != nil {
-			sevStr = c.severity(f.Severity, sevStr)
-		}
-		fmt.Fprintf(&b, "  [%s] %s %s\n    %s\n", sevStr, f.Code, f.Title, f.Description)
-		if f.Evidence != "" {
-			fmt.Fprintf(&b, "    Evidence: %s\n", f.Evidence)
-		}
-		if f.Remediation != "" {
-			fmt.Fprintf(&b, "    Remediation: %s\n", f.Remediation)
-		}
-		if f.ReferenceURL != "" {
-			fmt.Fprintf(&b, "    Reference: %s\n", f.ReferenceURL)
+	if debug {
+		if table := RenderPhaseTimingsTable(rep.PhaseTimings, rep.DurationMS); table != "" {
+			fmt.Fprintf(&b, "\n%s\n", table)
 		}
 	}
 	return b.String()

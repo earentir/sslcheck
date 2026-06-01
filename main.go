@@ -22,7 +22,7 @@ var appVersion = "0.1.108"
 
 const appRepoURL = "https://github.com/earentir/sslcheck"
 
-const validProfiles = "modern, strict"
+const validProfiles = "modern, strict, fast"
 
 // appOpts holds all CLI flags (root scan, persistent logging, api/web listen).
 type appOpts struct {
@@ -31,7 +31,7 @@ type appOpts struct {
 	Profile                       string
 	NoHTTP, NoActiveOCSP, NoColor bool
 	OutputFile                    string
-	Quiet, Verbose                bool
+	Quiet, Verbose, Debug, Fast   bool
 	FilePath                      string
 	FirstIPOnly                   bool
 	ProxyURL                      string
@@ -61,13 +61,15 @@ func init() {
 	fs.BoolVar(&App.SchemaOut, "schema", false, "emit JSON schema")
 	fs.BoolVar(&App.CSVOut, "csv", false, "emit findings as CSV")
 	fs.DurationVar(&App.Timeout, "timeout", 12*time.Second, "per operation timeout")
-	fs.StringVar(&App.Profile, "profile", "modern", "policy profile: modern|strict")
+	fs.StringVar(&App.Profile, "profile", "modern", "policy profile: modern|strict|fast")
+	fs.BoolVar(&App.Fast, "fast", false, "fast scan (same as --profile=fast): fewer TLS/HTTP probes, parallel where safe")
 	fs.BoolVar(&App.NoHTTP, "no-http", false, "skip HTTP probes")
 	fs.BoolVar(&App.NoActiveOCSP, "no-active-ocsp", false, "skip active OCSP URL checks")
 	fs.BoolVar(&App.NoColor, "no-color", false, "disable colored output")
 	fs.StringVarP(&App.OutputFile, "output", "o", "", "write report to file (default: stdout)")
 	fs.BoolVarP(&App.Quiet, "quiet", "q", false, "only print overall result and findings count")
 	fs.BoolVarP(&App.Verbose, "verbose", "v", false, "include full redirect chain and extra detail in text output")
+	fs.BoolVar(&App.Debug, "debug", false, "include scan phase timing table in text output")
 	fs.StringVar(&App.FilePath, "file", "", "read URLs from file (one per line, # for comments)")
 	fs.BoolVar(&App.FirstIPOnly, "ip", false, "only probe the first resolved IP")
 	fs.StringVar(&App.ProxyURL, "proxy", "", "connect via HTTP CONNECT proxy (host:port or URL)")
@@ -116,7 +118,10 @@ func run(_ *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if App.Profile != "modern" && App.Profile != "strict" {
+	if App.Fast {
+		App.Profile = "fast"
+	}
+	if App.Profile != "modern" && App.Profile != "strict" && App.Profile != "fast" {
 		logx.Error("invalid profile", "profile", App.Profile)
 		return fmt.Errorf("unknown profile %q; use one of: %s", App.Profile, validProfiles)
 	}
@@ -216,7 +221,7 @@ func run(_ *cobra.Command, args []string) error {
 		if i > 0 {
 			fmt.Fprintf(out, "\n---\n\n")
 		}
-		fmt.Fprint(out, report.Render(rep, useColor, App.Verbose))
+		fmt.Fprint(out, report.Render(rep, useColor, App.Verbose, App.Debug))
 	}
 	return nil
 }

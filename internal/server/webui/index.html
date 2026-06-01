@@ -163,8 +163,9 @@
       transform: translateY(-1px);
       box-shadow: 0 6px 20px rgba(68, 147, 248, 0.45);
     }
-    #btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
+    #btn:disabled { opacity: 0.65; cursor: wait; transform: none; box-shadow: none; }
     .hint { font-size: 0.8rem; color: var(--muted); }
+    #scanStatus { font-size: 0.85rem; color: var(--info); min-height: 1.25rem; }
 
     /* Error / warning banners (hover for full text) */
     .alert {
@@ -294,9 +295,14 @@
               <option value="6">IPv6 only</option>
             </select>
           </div>
+          <div class="scan-field">
+            <label for="timeoutSec">Per-step timeout (seconds)</label>
+            <input type="number" id="timeoutSec" min="5" max="120" value="12" aria-label="Per-step timeout seconds">
+          </div>
         </div>
         <div class="scan-actions">
           <button type="submit" id="btn">Run scan</button>
+          <span id="scanStatus" class="hint" aria-live="polite"></span>
           <span class="hint">Hover findings for full description, evidence &amp; remediation</span>
         </div>
       </div>
@@ -331,6 +337,15 @@
       <div class="card">
         <h2>DNS</h2>
         <p id="dns" class="meta"></p>
+      </div>
+      <div class="card" id="timingCard">
+        <h2>Scan timing</h2>
+        <div style="overflow-x:auto">
+          <table id="timingTable">
+            <thead><tr><th>Phase</th><th>ms</th><th>%</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
       <div class="card">
         <h2>Findings <span id="nfc"></span></h2>
@@ -426,7 +441,9 @@
       }
     });
     function scanRequestBody(url) {
-      const body = { url: url, profile: 'modern', timeout_seconds: 30 };
+      const body = { url: url, profile: 'modern', timeout_seconds: 12 };
+      const t = parseInt(document.getElementById('timeoutSec').value, 10);
+      if (!isNaN(t) && t >= 5 && t <= 120) body.timeout_seconds = t;
       const dns = (document.getElementById('dnsServer').value || '').trim();
       const ipver = (document.getElementById('ipVersion').value || '').trim();
       if (dns) body.dns_server = dns;
@@ -434,15 +451,20 @@
       return body;
     }
 
+    let scanInFlight = false;
+
     async function runScan(url) {
       const btn = document.getElementById('btn');
+      const statusEl = document.getElementById('scanStatus');
       const errEl = document.getElementById('err');
       const warnEl = document.getElementById('warnBanner');
       const out = document.getElementById('out');
+      if (scanInFlight) return;
       errEl.classList.add('hidden');
       warnEl.classList.add('hidden');
       out.classList.add('hidden');
       document.getElementById('shareBox').classList.add('hidden');
+      statusEl.textContent = '';
       if (!url || !url.trim()) {
         errEl.querySelector('pre').textContent = 'Enter a hostname or URL.';
         errEl.removeAttribute('title');
@@ -452,12 +474,21 @@
       url = url.trim();
       const dnsField = (document.getElementById('dnsServer').value || '').trim();
       const ipVerField = (document.getElementById('ipVersion').value || '').trim();
+      const body = scanRequestBody(url);
+      const btnLabel = btn.textContent;
+      scanInFlight = true;
       btn.disabled = true;
+      btn.textContent = 'Scanning…';
+      statusEl.textContent = 'Scan in progress (may take a few minutes)…';
+      const clientMs = Math.min(body.timeout_seconds * 10 * 1000, 15 * 60 * 1000);
+      const ac = new AbortController();
+      const clientTimer = setTimeout(function () { ac.abort(); }, clientMs);
       try {
         const res = await fetch('/api/v1/scan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(scanRequestBody(url))
+          body: JSON.stringify(body),
+          signal: ac.signal
         });
         let data;
         try { data = await res.json(); } catch (_) { data = {}; }
@@ -466,11 +497,13 @@
           errEl.querySelector('pre').textContent = msg;
           errEl.title = msg.length > 120 ? msg : '';
           errEl.classList.remove('hidden');
+          statusEl.textContent = '';
           return;
         }
         const g = gradeFromReport(data);
-        document.getElementById('overall').textContent = data.overall.toUpperCase();
-        document.getElementById('overall').className = 'overall ' + data.overall;
+        const overall = data.overall || 'unknown';
+        document.getElementById('overall').textContent = overall.toUpperCase();
+        document.getElementById('overall').className = 'overall ' + overall;
         document.getElementById('grade').textContent = 'Grade: ' + g;
         document.getElementById('urlout').textContent = data.url + ' · ' + (data.duration_ms || 0) + ' ms';
         setShareURL(data.host || '', dnsField, ipVerField);
@@ -507,7 +540,41 @@
         }
         document.getElementById('dns').textContent =
           'IPs: ' + ((data.dns && data.dns.ips) || []).join(', ') +
-          (data.dns && data.dns.cname ? ' · CNAME: ' + data.dns.cname : '');
+          (data.dns && data.dns.cname ? ' · CNAME: ' + data.dns.cname : '') +
+          (data.dns && data.dns.lookup_ms != null ? ' · lookup: ' + data.dns.lookup_ms + ' ms' : '');
+        const ttb = document.querySelector('#timingTable tbody');
+        ttb.innerHTML = '';
+        const phases = data.phase_timings || [];
+        const totalMs = data.duration_ms || 0;
+        let sumMs = 0;
+        phases.forEach(function (p) {
+          sumMs += p.duration_ms || 0;
+          const pct = totalMs > 0 ? ((p.duration_ms || 0) / totalMs * 100).toFixed(1) : '0.0';
+          const tr = document.createElement('tr');
+          tr.innerHTML =
+            '<td>' + escapeHtml(p.name || '') + '</td>' +
+            '<td>' + (p.duration_ms || 0) + '</td>' +
+            '<td>' + pct + '%</td>';
+          ttb.appendChild(tr);
+        });
+        if (totalMs - sumMs > 5) {
+          const overhead = totalMs - sumMs;
+          const tr = document.createElement('tr');
+          tr.innerHTML =
+            '<td class="meta">Overhead (between phases)</td>' +
+            '<td>' + overhead + '</td>' +
+            '<td>' + (totalMs > 0 ? (overhead / totalMs * 100).toFixed(1) : '0.0') + '%</td>';
+          ttb.appendChild(tr);
+        }
+        if (totalMs > 0) {
+          const tr = document.createElement('tr');
+          tr.innerHTML =
+            '<td><strong>Total (wall clock)</strong></td>' +
+            '<td><strong>' + totalMs + '</strong></td>' +
+            '<td></td>';
+          ttb.appendChild(tr);
+        }
+        document.getElementById('timingCard').style.display = phases.length ? 'block' : 'none';
         const tb = document.querySelector('#ft tbody');
         tb.innerHTML = '';
         const findings = data.findings || [];
@@ -535,12 +602,20 @@
         });
         document.getElementById('raw').textContent = JSON.stringify(data, null, 2);
         out.classList.remove('hidden');
+        statusEl.textContent = 'Finished in ' + (data.duration_ms || 0) + ' ms';
       } catch (x) {
-        errEl.querySelector('pre').textContent = String(x);
-        errEl.title = String(x);
+        var msg = (x && x.name === 'AbortError')
+          ? 'Browser gave up waiting. Raise per-step timeout or run: sslcheck --timeout 60s <url>'
+          : String(x);
+        errEl.querySelector('pre').textContent = msg;
+        errEl.title = msg;
         errEl.classList.remove('hidden');
+        statusEl.textContent = '';
       } finally {
+        clearTimeout(clientTimer);
+        scanInFlight = false;
         btn.disabled = false;
+        btn.textContent = btnLabel;
       }
     }
     document.getElementById('f').addEventListener('submit', function (e) {

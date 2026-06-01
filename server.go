@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -55,7 +54,7 @@ func runAPI(cmd *cobra.Command, args []string) error {
 	server.SetScannerMeta(appVersion, appRepoURL)
 	logx.Info("starting API server", "listen", App.Listen)
 	printListenURLs("api", "/api/v1/health")
-	if err := http.ListenAndServe(App.Listen, server.APIOnly()); err != nil {
+	if err := server.ListenAndServe(App.Listen, server.APIOnly()); err != nil {
 		logx.Error("API server exited", "listen", App.Listen, "err", err.Error())
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -66,7 +65,7 @@ func runWeb(cmd *cobra.Command, args []string) error {
 	server.SetScannerMeta(appVersion, appRepoURL)
 	logx.Info("starting web server", "listen", App.Listen)
 	printListenURLs("web", "/")
-	if err := http.ListenAndServe(App.Listen, server.Web(server.WebUIFS())); err != nil {
+	if err := server.ListenAndServe(App.Listen, server.Web(server.WebUIFS())); err != nil {
 		logx.Error("web server exited", "listen", App.Listen, "err", err.Error())
 		return fmt.Errorf("listen: %w", err)
 	}

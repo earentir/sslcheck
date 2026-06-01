@@ -49,13 +49,7 @@ func newHTTPClientTLS(serverName string, resolver *net.Resolver, ipVersion strin
 }
 
 func minDialTimeout(clientTimeout time.Duration) time.Duration {
-	if clientTimeout <= 0 {
-		return 30 * time.Second
-	}
-	if clientTimeout > 30*time.Second {
-		return 30 * time.Second
-	}
-	return clientTimeout
+	return netx.TCPDialTimeout(clientTimeout)
 }
 
 // FetchHTTPClient builds an HTTP client for outbound HTTPS (AIA, OCSP) using the same DNS resolver and IP family as scan probes.
@@ -106,7 +100,7 @@ func ProbeRedirect(ctx context.Context, httpsURL *url.URL, resolver *net.Resolve
 }
 
 // ProbeHTTPS performs a GET on the HTTPS URL. Resolver and ipVersion ("", "4", "6") control how hostnames are resolved.
-func ProbeHTTPS(ctx context.Context, u *url.URL, timeout time.Duration, resolver *net.Resolver, ipVersion string) model.HTTPResult {
+func ProbeHTTPS(ctx context.Context, u *url.URL, timeout time.Duration, resolver *net.Resolver, ipVersion string, fast bool) model.HTTPResult {
 	result := model.HTTPResult{}
 	logx.Debug("ProbeHTTPS GET", "url", u.String(), "timeout", timeout.String())
 	client := newHTTPClientTLS(u.Hostname(), resolver, ipVersion, timeout)
@@ -142,12 +136,14 @@ func ProbeHTTPS(ctx context.Context, u *url.URL, timeout time.Duration, resolver
 	result.MixedContentHits = mixedContentFromRefs(result.SubresourceRefs)
 
 	active := activeHTTPSHosts(result.SubresourceRefs, resp.Request.URL.Hostname())
-	logx.Debug("subresource TLS probes", "count", len(active))
-	for _, host := range active {
-		sr := tlsprobe.ProbeSubresourceHost(ctx, host, "443", timeout, resolver, ipVersion)
-		result.SubresourceHosts = append(result.SubresourceHosts, sr)
+	if !fast {
+		logx.Debug("subresource TLS probes", "count", len(active))
+		for _, host := range active {
+			sr := tlsprobe.ProbeSubresourceHost(ctx, host, "443", timeout, resolver, ipVersion)
+			result.SubresourceHosts = append(result.SubresourceHosts, sr)
+		}
+		sort.Slice(result.SubresourceHosts, func(i, j int) bool { return result.SubresourceHosts[i].Host < result.SubresourceHosts[j].Host })
 	}
-	sort.Slice(result.SubresourceHosts, func(i, j int) bool { return result.SubresourceHosts[i].Host < result.SubresourceHosts[j].Host })
 
 	return result
 }

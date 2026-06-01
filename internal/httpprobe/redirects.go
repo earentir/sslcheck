@@ -25,7 +25,7 @@ func ProbeRedirectChain(ctx context.Context, httpsURL *url.URL, resolver *net.Re
 	logx.Debug("ProbeRedirectChain start", "from", httpURL.String())
 	tr := &http.Transport{
 		Proxy:           http.ProxyFromEnvironment,
-		DialContext:     netx.HTTPDialContext(resolver, ipVersion, 10*time.Second),
+		DialContext:     netx.HTTPDialContext(resolver, ipVersion, netx.TCPDialTimeout(10*time.Second)),
 		ForceAttemptHTTP2: false,
 	}
 	client := &http.Client{

@@ -15,7 +15,7 @@ func HTTPDialContext(resolver *net.Resolver, ipVersion string, dialTimeout time.
 	if r == nil {
 		r = net.DefaultResolver
 	}
-	d := &net.Dialer{Timeout: dialTimeout, Resolver: r}
+	d := &net.Dialer{Timeout: TCPDialTimeout(dialTimeout), Resolver: r}
 	fam := ipVersion
 	if fam == "4" {
 		fam = "ip4"

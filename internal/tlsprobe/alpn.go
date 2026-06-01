@@ -10,9 +10,7 @@ import (
 )
 
 func probeALPN(parent context.Context, host, port, ip, network string, timeout time.Duration, dialer ContextDialer) *model.ALPNResult {
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
+	_ = parent
 	h2OK, h2Err := tryALPN(parent, host, port, ip, network, timeout, []string{"h2"}, dialer)
 	h11OK, h11Err := tryALPN(parent, host, port, ip, network, timeout, []string{"http/1.1"}, dialer)
 	return &model.ALPNResult{
@@ -22,8 +20,9 @@ func probeALPN(parent context.Context, host, port, ip, network string, timeout t
 }
 
 func tryALPN(parent context.Context, host, port, ip, network string, timeout time.Duration, protos []string, dialer ContextDialer) (bool, string) {
+	_ = parent
 	addr := net.JoinHostPort(ip, port)
-	rawConn, err := dialer.DialContext(parent, network, addr)
+	rawConn, err := dialTCP(dialer, timeout, network, addr)
 	if err != nil { return false, err.Error() }
 	defer rawConn.Close()
 

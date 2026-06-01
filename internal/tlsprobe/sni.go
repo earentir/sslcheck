@@ -11,12 +11,10 @@ import (
 )
 
 func probeWrongSNI(parent context.Context, host, port, ip, network string, timeout time.Duration, dialer ContextDialer) []model.Finding {
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
+	_ = parent
 	badName := "wrong-sni.invalid"
 	addr := net.JoinHostPort(ip, port)
-	rawConn, err := dialer.DialContext(parent, network, addr)
+	rawConn, err := dialTCP(dialer, timeout, network, addr)
 	if err != nil { return nil }
 	defer rawConn.Close()
 

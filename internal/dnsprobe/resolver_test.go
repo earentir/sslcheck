@@ -4,8 +4,8 @@ import "testing"
 
 func TestResolverForDNSServer_Default(t *testing.T) {
 	r := ResolverForDNSServer("")
-	if r == nil {
-		t.Fatal("nil resolver")
+	if r == nil || r.PreferGo {
+		t.Fatalf("expected libc resolver (PreferGo false), got %+v", r)
 	}
 }
 

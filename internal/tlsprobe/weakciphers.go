@@ -21,9 +21,7 @@ var weakCipherTests = []struct {
 }
 
 func probeWeakCiphers(parent context.Context, host, port, ip, network string, timeout time.Duration, result *model.EndpointResult, dialer ContextDialer) {
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
+	_ = parent
 	for _, tc := range weakCipherTests {
 		ok := trySpecificCipher(parent, host, port, ip, network, timeout, tc.ID, tc.Version, dialer)
 		if !ok { continue }
@@ -39,11 +37,9 @@ func probeWeakCiphers(parent context.Context, host, port, ip, network string, ti
 }
 
 func trySpecificCipher(parent context.Context, host, port, ip, network string, timeout time.Duration, cipher uint16, version uint16, dialer ContextDialer) bool {
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
+	_ = parent
 	addr := net.JoinHostPort(ip, port)
-	rawConn, err := dialer.DialContext(parent, network, addr)
+	rawConn, err := dialTCP(dialer, timeout, network, addr)
 	if err != nil { return false }
 	defer rawConn.Close()
 	cfg := &tls.Config{

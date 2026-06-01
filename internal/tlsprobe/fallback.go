@@ -16,14 +16,12 @@ import (
 // TLS 1.3 should reject with inappropriate_fallback. If the handshake succeeds, we
 // report that fallback SCSV is not enforced.
 func probeTLSFallbackSCSV(parent context.Context, host, port, ip, network string, timeout time.Duration, result *model.EndpointResult, dialer ContextDialer) {
+	_ = parent
 	if !result.ProtocolSupport["TLS1.3"] {
 		return
 	}
-	if dialer == nil {
-		dialer = &net.Dialer{Timeout: timeout}
-	}
 	addr := net.JoinHostPort(ip, port)
-	rawConn, err := dialer.DialContext(parent, network, addr)
+	rawConn, err := dialTCP(dialer, timeout, network, addr)
 	if err != nil {
 		return
 	}
