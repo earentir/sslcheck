@@ -82,6 +82,22 @@ func TestConsistencyFindings_DualStackIPv4IPv6LeafMismatch(t *testing.T) {
 	})
 }
 
+func TestConsistencyFindings_TLSVersionMismatch(t *testing.T) {
+	eps := []model.EndpointResult{
+		{IP: "192.0.2.1", TLSVersion: "TLS1.2"},
+		{IP: "192.0.2.2", TLSVersion: "TLS1.3"},
+	}
+	var seen bool
+	for _, f := range ConsistencyFindings(eps) {
+		if f.Code == "EDGE-001" {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Fatal("expected EDGE-001")
+	}
+}
+
 func TestDeriveOverall(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -92,6 +108,8 @@ func TestDeriveOverall(t *testing.T) {
 		{"info only", []model.Finding{{Severity: model.SeverityInfo}}, "pass"},
 		{"low", []model.Finding{{Severity: model.SeverityLow}}, "warn"},
 		{"medium", []model.Finding{{Severity: model.SeverityMedium}}, "warn"},
+		{"cert expires soon", []model.Finding{{Code: "CERT-012", Severity: model.SeverityMedium}}, "warn"},
+		{"cert expired", []model.Finding{{Code: "CERT-011", Severity: model.SeverityCritical}}, "fail"},
 		{"high", []model.Finding{{Severity: model.SeverityHigh}}, "fail"},
 		{"critical", []model.Finding{{Severity: model.SeverityCritical}}, "fail"},
 		{"worst wins", []model.Finding{
