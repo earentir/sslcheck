@@ -347,7 +347,7 @@ func analyzeCertificates(host string, chain []*x509.Certificate) (*model.Certifi
 		})
 	} else if summary.DaysUntilExpiry <= 7 {
 		findings = append(findings, model.Finding{
-			Code: "CERT-012", Severity: model.SeverityHigh, Title: "Certificate expires soon",
+			Code: "CERT-012", Severity: model.SeverityMedium, Title: "Certificate expires soon",
 			Description: "Less than 8 days until NotAfter.",
 			Evidence: fmt.Sprintf("%d days until %s", summary.DaysUntilExpiry, leaf.NotAfter.UTC().Format(time.RFC3339)),
 			Remediation: "Renew now; shorten renewal automation window if this is recurring.",
