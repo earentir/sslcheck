@@ -13,6 +13,8 @@ Used by **`sslcheck api`** and **`sslcheck web`** (web also serves non-API pages
 | GET | `/api/v1/scan` | Run scan; options as **query** parameters (below). |
 | POST | `/api/v1/scan` | Run scan; JSON body with same fields as GET query. |
 | OPTIONS | `/api/v1/scan` | Empty `204` for CORS preflight. |
+| POST | `/api/v1/analyze` | Analyze agent-collected capture JSON (no target dial). |
+| OPTIONS | `/api/v1/analyze` | Empty `204` for CORS preflight. |
 
 ## Scan request parameters
 
@@ -31,6 +33,10 @@ All optional except **`url`** (required).
 | `ip_version` | `4` or `6` only | empty → both families |
 
 Registered in `internal/server/mux.go`; defaults enforced in `internal/server/scan.go`.
+
+## Analyze request (agent path)
+
+`POST /api/v1/analyze` accepts pre-collected probe data from a networkplane agent. Required: **`url`**, **`capture`** (see `internal/model/capture.go`). Optional: same `profile`, `timeout_seconds`, `no_http`, `no_active_ocsp` as scan. Response: same report JSON as `/scan`. Handler: `internal/server/analyze.go`.
 
 ## Checks catalog
 

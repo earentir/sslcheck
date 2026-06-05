@@ -58,4 +58,14 @@ func registerAPI(m *http.ServeMux) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
+	m.HandleFunc("/api/v1/analyze", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			HandleAnalyzePOST(w, r)
+		case http.MethodOptions:
+			HandleAnalyzeOPTIONS(w, r)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
 }
